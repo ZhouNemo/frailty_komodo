@@ -8,7 +8,6 @@ library(DBI)
 # ---- Purpose ----
 # QA checks for the annual eligible population table created by:
 # Code/1.1_build_annual_eligible_population.R
-# This script prints only schema and aggregate outputs, not patient-level rows.
 
 # ---- Connection settings ----
 Sys.setenv(
@@ -17,7 +16,7 @@ Sys.setenv(
 
 komodo_schema <- "komodo_ext"
 write_schema <- paste0("work_", keyring::key_get("db_username"))
-eligibility_table <- "annual_eligible_population"
+eligibility_table <- "1_annual_eligible_cohort"
 min_count <- 11L
 
 # ---- Connect to Redshift ----
@@ -30,10 +29,21 @@ options(con.default.value = con)
 options(schema.default.value = komodo_schema)
 options(write_schema.default.value = write_schema)
 
+# ---- Helper: quote SQL identifiers ----
+quote_identifier <- function(identifier) {
+  paste0('"', gsub('"', '""', identifier, fixed = TRUE), '"')
+}
+
+eligibility_table_identifier <- paste(
+  quote_identifier(write_schema),
+  quote_identifier(eligibility_table),
+  sep = "."
+)
+
 # ---- Reference saved eligibility table ----
 eligible_population <- tbl(
   con,
-  inDatabaseSchema(write_schema, eligibility_table)
+  dbplyr::sql(paste0("SELECT * FROM ", eligibility_table_identifier))
 )
 
 # ---- Check table structure without collecting patient rows ----
@@ -54,8 +64,12 @@ required_columns <- c(
   "patient_gender",
   "mx_insurance_group",
   "mx_insurance_segment",
+  "mx_secondary_insurance_group",
+  "mx_secondary_insurance_segment",
   "rx_insurance_group",
-  "rx_insurance_segment"
+  "rx_insurance_segment",
+  "rx_secondary_insurance_group",
+  "rx_secondary_insurance_segment"
 )
 
 missing_columns <- setdiff(required_columns, eligibility_columns)
@@ -87,8 +101,12 @@ insurance_counts <- eligible_population |>
     analysis_year,
     mx_insurance_group,
     mx_insurance_segment,
+    mx_secondary_insurance_group,
+    mx_secondary_insurance_segment,
     rx_insurance_group,
     rx_insurance_segment,
+    rx_secondary_insurance_group,
+    rx_secondary_insurance_segment,
     name = "n_person_years"
   ) |>
   filter(n_person_years >= min_count) |>
@@ -96,8 +114,12 @@ insurance_counts <- eligible_population |>
     analysis_year,
     mx_insurance_group,
     mx_insurance_segment,
+    mx_secondary_insurance_group,
+    mx_secondary_insurance_segment,
     rx_insurance_group,
-    rx_insurance_segment
+    rx_insurance_segment,
+    rx_secondary_insurance_group,
+    rx_secondary_insurance_segment
   ) |>
   collect()
 
@@ -108,14 +130,42 @@ message("Checking for missing or UNKNOWN insurance classifications.")
 
 unexpected_insurance_values <- eligible_population |>
   summarize(
-    missing_mx_group = sum(is.na(mx_insurance_group)),
-    missing_mx_segment = sum(is.na(mx_insurance_segment)),
-    missing_rx_group = sum(is.na(rx_insurance_group)),
-    missing_rx_segment = sum(is.na(rx_insurance_segment)),
-    unknown_mx_group = sum(mx_insurance_group == "UNKNOWN", na.rm = TRUE),
-    unknown_mx_segment = sum(mx_insurance_segment == "UNKNOWN", na.rm = TRUE),
-    unknown_rx_group = sum(rx_insurance_group == "UNKNOWN", na.rm = TRUE),
-    unknown_rx_segment = sum(rx_insurance_segment == "UNKNOWN", na.rm = TRUE)
+    missing_mx_group = sql(
+      "SUM(CASE WHEN mx_insurance_group IS NULL THEN 1 ELSE 0 END)::BIGINT"
+    ),
+    missing_mx_segment = sql(
+      "SUM(CASE WHEN mx_insurance_segment IS NULL THEN 1 ELSE 0 END)::BIGINT"
+    ),
+    missing_rx_group = sql(
+      "SUM(CASE WHEN rx_insurance_group IS NULL THEN 1 ELSE 0 END)::BIGINT"
+    ),
+    missing_rx_segment = sql(
+      "SUM(CASE WHEN rx_insurance_segment IS NULL THEN 1 ELSE 0 END)::BIGINT"
+    ),
+    unknown_mx_group = sql(
+      "SUM(CASE WHEN mx_insurance_group = 'UNKNOWN' THEN 1 ELSE 0 END)::BIGINT"
+    ),
+    unknown_mx_segment = sql(
+      "SUM(CASE WHEN mx_insurance_segment = 'UNKNOWN' THEN 1 ELSE 0 END)::BIGINT"
+    ),
+    unknown_mx_secondary_group = sql(
+      "SUM(CASE WHEN mx_secondary_insurance_group = 'UNKNOWN' THEN 1 ELSE 0 END)::BIGINT"
+    ),
+    unknown_mx_secondary_segment = sql(
+      "SUM(CASE WHEN mx_secondary_insurance_segment = 'UNKNOWN' THEN 1 ELSE 0 END)::BIGINT"
+    ),
+    unknown_rx_group = sql(
+      "SUM(CASE WHEN rx_insurance_group = 'UNKNOWN' THEN 1 ELSE 0 END)::BIGINT"
+    ),
+    unknown_rx_segment = sql(
+      "SUM(CASE WHEN rx_insurance_segment = 'UNKNOWN' THEN 1 ELSE 0 END)::BIGINT"
+    ),
+    unknown_rx_secondary_group = sql(
+      "SUM(CASE WHEN rx_secondary_insurance_group = 'UNKNOWN' THEN 1 ELSE 0 END)::BIGINT"
+    ),
+    unknown_rx_secondary_segment = sql(
+      "SUM(CASE WHEN rx_secondary_insurance_segment = 'UNKNOWN' THEN 1 ELSE 0 END)::BIGINT"
+    )
   ) |>
   collect()
 
