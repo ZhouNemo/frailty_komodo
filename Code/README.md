@@ -18,7 +18,7 @@ Use this as the implementation template before writing extraction, cohort-buildi
 
 Diagnostic script for `PATIENT_INSURANCE` date-overlap behavior. It creates a small random sample of patients from `komodo_ext.patient_insurance`, pulls all insurance rows for those sampled patients, and checks whether overlapping `row_valid_start` / `row_valid_end` spans contain different known primary `mx_insurance_group` or `rx_insurance_group` values at the same time.
 
-The script materializes aggregate diagnostic tables in the user's `write_schema` and prints only aggregate counts or group-pair summaries that meet the minimum count threshold. It does not print patient IDs or raw patient-level rows. Run this before deciding whether annual eligibility should exclude multiple primary insurance groups or allow multi-group patient-year attribution.
+Run this before deciding whether annual eligibility should exclude multiple primary insurance groups or allow multi-group patient-year attribution.
 
 ## `1.1_build_annual_eligible_population.R`
 
