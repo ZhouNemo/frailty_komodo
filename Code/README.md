@@ -74,8 +74,26 @@ Focused subgroup analysis for the 2021 annual eligible population. It selects pa
 
 Run this after `1.1_build_annual_eligible_population.R` and `1.2_check_annual_eligible_population.R`.
 
-## `3.1_prepare_annual_cfi_inputs.R`
+## `3.1_prepare_2016_cfi_inputs.R`
 
-Production preparation script for annual Claims-Based Frailty Index inputs from 2016 through 2025. It uses the materialized `1_annual_eligible_cohort` without adding a `PATIENT_CLOSED` requirement, assigns claims from each calendar year to a patient-year CFI index date of January 1 in the following year, and materializes `cfi_annual_ids`, `cfi_annual_dx09`, `cfi_annual_dx10`, and `cfi_annual_px` in the user's Redshift write schema. Inpatient events use `claim_from_date`; non-inpatient events use `service_date`. Diagnosis and inpatient CPT/HCPCS arrays are expanded through their complete observed lengths without a fixed cap, codes are normalized, and patient-year/code combinations are deduplicated.
+Validation preparation script for 2016 Claims-Based Frailty Index inputs. It invokes the same year-batched extraction engine as `3.2_prepare_annual_cfi_inputs.R`, but restricts processing to 2016 and writes separate `cfi_2016_ids`, `cfi_2016_dx09`, `cfi_2016_dx10`, and `cfi_2016_px` tables. Use these outputs to confirm that one year fits within available Redshift resources and passes membership, uniqueness, and code-format checks without modifying production annual tables.
 
-Run this after `0.5_check_event_table_structure.R`, `1.1_build_annual_eligible_population.R`, and `1.2_check_annual_eligible_population.R`. See `Documents/ANNUAL_CFI_INPUT_PREPARATION.md` for the detailed time-window, extraction, normalization, output-table, and QA definitions. The resulting tables are inputs for the subsequent CFI lookup and scoring script.
+Run this after `0.5_check_event_table_structure.R`, `1.1_build_annual_eligible_population.R`, and `1.2_check_annual_eligible_population.R`.
+
+## `3.2_prepare_annual_cfi_inputs.R`
+
+Production preparation script for annual Claims-Based Frailty Index inputs from 2016 through 2025. It creates the full `cfi_annual_ids` denominator, then processes inpatient and non-inpatient events one calendar year at a time to limit peak Redshift temporary-disk use. Each year replaces only its own existing diagnosis and procedure rows before appending deduplicated results, allowing interrupted or selected-year runs to be restarted without duplicating data. The script writes `cfi_annual_ids`, `cfi_annual_dx09`, `cfi_annual_dx10`, and `cfi_annual_px`.
+
+Run `3.1_prepare_2016_cfi_inputs.R` successfully before this production script. See `Documents/ANNUAL_CFI_INPUT_PREPARATION.md` for the detailed time-window, extraction, normalization, batching, output-table, and QA definitions.
+
+## `3.3_compute_2016_cfi_scores.R`
+
+Scoring script for the 2016 Claims-Based Frailty Index validation workflow. It consumes the `cfi_2016_ids`, `cfi_2016_dx09`, `cfi_2016_dx10`, and `cfi_2016_px` tables created by `3.1_prepare_2016_cfi_inputs.R`, stages the official CFI diagnosis, procedure, and model-weight lookup files from the local CFI reference package, and materializes one Redshift score row per 2016 eligible patient-year in `cfi_2016_scores`. Patient-level scores remain in Redshift. The script writes aggregate-only QA, descriptive, and category summaries to `Outputs`.
+
+Run this after `3.1_prepare_2016_cfi_inputs.R` succeeds and before extending CFI scoring to all annual production tables.
+
+## `3.4_summarize_2016_cfi_by_subgroups.R`
+
+Aggregate reporting script for the 2016 CFI validation scores. It summarizes `cfi_2016_scores` overall and by age group, sex, primary medical insurance group, and primary prescription insurance group. When `komodo_ext.patient_race_ethnicity` is available, it also adds race/ethnicity summaries. The script reports CFI mean, minimum, Q1, median, Q3, maximum, the number of patient-years with the model-intercept value, and frailty categories using the cut points `<0.15`, `0.15 to <0.25`, `0.25 to <0.35`, `0.35 to <0.45`, and `>=0.45`. It writes aggregate-only CSVs to `Outputs`.
+
+Run this after `3.3_compute_2016_cfi_scores.R` has created `cfi_2016_scores`.
