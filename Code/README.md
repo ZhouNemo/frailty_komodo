@@ -2,7 +2,7 @@
 
 This folder contains the R scripts used to connect to Komodo, prototype claims workflows, diagnose annual eligibility assumptions, build the annual eligible population, generate aggregate summaries, and prepare claims-based index inputs. Scripts should be run in numeric order unless a task-specific note says otherwise.
 
-Numeric order logic: 0.xx: code for testing/checking/diagnosis; 1.xx: code to generate the study sample; 2.xx: code to do summary analyses; 3.xx: code to prepare and calculate claims-based indices
+Numeric order logic: 0.xx: code for testing/checking/diagnosis; 1.xx: code to generate the study sample; 2.xx: code to do summary analyses; 3.xx: code to prepare and calculate claims-based indices; 4.xx: code to report descriptive findings from prepared analysis tables
 
 ## `0.1_connect to Komodo.R`
 
@@ -32,7 +32,13 @@ Run this before the full production build when changing annual eligibility SQL.
 
 Small-sample structural diagnostic for `INPATIENT_EVENTS` and `NON_INPATIENT_EVENTS`. It validates the use of inpatient `claim_from_date` and non-inpatient `service_date`, checks that documented array fields contain valid JSON-style arrays, flattens diagnosis and inpatient CPT/HCPCS arrays by exact array position, verifies diagnosis normalization and five-character procedure formats, and checks whether non-inpatient primary diagnoses are already contained in `diagnosis_codes`. It uses temporary Redshift tables and prints aggregate checks without displaying patient identifiers, dates, or individual codes.
 
-Run this before implementing the production CFI diagnosis and CPT/HCPCS extraction described in `Documents/INPATIENT_AND_NON_INPATIENT_EVENT_STRUCTURE.md`.
+Run this before implementing the production CFI diagnosis and CPT/HCPCS extraction described in `Documents/04_INPATIENT_AND_NON_INPATIENT_EVENT_STRUCTURE.md`.
+
+## `0.6_check_krd_table_inventory.R`
+
+Schema-level diagnostic for listing all visible tables in the configured Komodo Redshift read schema, currently `komodo_ext`. It reads the project data dictionary, queries `information_schema.tables`, compares expected dictionary table names with visible Redshift table names, prints the results, and saves `0.6_krd_table_inventory.csv` and `0.6_krd_table_dictionary_comparison.csv` in `Outputs`.
+
+Run this when checking available KRD table names or validating whether a documented table is accessible in the current OHDSI Lab workspace.
 
 ## `1.1_build_annual_eligible_population.R`
 
@@ -43,6 +49,12 @@ Run this after the annual eligibility logic has been finalized and after any dia
 ## `1.2_check_annual_eligible_population.R`
 
 Aggregate QA script for the materialized `1_annual_eligible_cohort` table. It should be used after `1.1_build_annual_eligible_population.R` to verify row counts, insurance-category distributions, and other non-patient-level diagnostics needed before downstream annual analyses.
+
+## `1.3_join_race_ethnicity_to_eligible_cohort.R`
+
+Production script for adding the KRD recommended patient-level race/ethnicity variable to the annual eligible cohort. It archives the original race-free table as `work_<username>.1_annual_eligible_cohort_without_race`, collapses `komodo_ext.patient_race_ethnicity` to one row per patient, left joins the result, and saves the race/ethnicity-enhanced cohort back to `work_<username>.1_annual_eligible_cohort` so downstream scripts can use the original table name. It prints aggregate annual counts and race/ethnicity distributions for QA.
+
+Run this after `1.1_build_annual_eligible_population.R` and `1.2_check_annual_eligible_population.R` when race/ethnicity-stratified summaries are needed.
 
 ## `2.1_generate_2016_table1.R`
 
@@ -84,7 +96,7 @@ Run this after `0.5_check_event_table_structure.R`, `1.1_build_annual_eligible_p
 
 Production preparation script for annual Claims-Based Frailty Index inputs from 2016 through 2025. It creates the full `cfi_annual_ids` denominator, then processes inpatient and non-inpatient events one calendar year at a time to limit peak Redshift temporary-disk use. Each year replaces only its own existing diagnosis and procedure rows before appending deduplicated results, allowing interrupted or selected-year runs to be restarted without duplicating data. The script writes `cfi_annual_ids`, `cfi_annual_dx09`, `cfi_annual_dx10`, and `cfi_annual_px`.
 
-Run `3.1_prepare_2016_cfi_inputs.R` successfully before this production script. See `Documents/ANNUAL_CFI_INPUT_PREPARATION.md` for the detailed time-window, extraction, normalization, batching, output-table, and QA definitions.
+Run `3.1_prepare_2016_cfi_inputs.R` successfully before this production script. See `Documents/05_ANNUAL_CFI_INPUT_PREPARATION.md` for the detailed time-window, extraction, normalization, batching, output-table, and QA definitions.
 
 ## `3.3_compute_2016_cfi_scores.R`
 
@@ -97,3 +109,15 @@ Run this after `3.1_prepare_2016_cfi_inputs.R` succeeds and before extending CFI
 Aggregate reporting script for the 2016 CFI validation scores. It summarizes `cfi_2016_scores` overall and by age group, sex, primary medical insurance group, and primary prescription insurance group. When `komodo_ext.patient_race_ethnicity` is available, it also adds race/ethnicity summaries. The script reports CFI mean, minimum, Q1, median, Q3, maximum, the number of patient-years with the model-intercept value, and frailty categories using the cut points `<0.15`, `0.15 to <0.25`, `0.25 to <0.35`, `0.35 to <0.45`, and `>=0.45`. It writes aggregate-only CSVs to `Outputs`.
 
 Run this after `3.3_compute_2016_cfi_scores.R` has created `cfi_2016_scores`.
+
+## `4.1_extract_2016_cfi_descriptive_outputs.R`
+
+Redshift extraction script for the 2016 CFI descriptive analysis. It queries aggregate summaries from `cfi_2016_scores` and `cfi_2016_ids`, adds race/ethnicity from the race-enhanced annual eligible cohort when available, and writes reusable aggregate CSVs to `Outputs`. The outputs cover CFI overall and by age group, sex, race/ethnicity, primary Mx group, primary Rx group, primary Mx segment, and primary Rx segment; the Table 1 shows percentages with frailty-group counts in the column headers, and histogram bins are overall only. Run this only when upstream data or analysis definitions change.
+
+Run this after `1.3_join_race_ethnicity_to_eligible_cohort.R`, `3.3_compute_2016_cfi_scores.R`, and `3.4_summarize_2016_cfi_by_subgroups.R`.
+
+## `4.2_visualize_2016_cfi_descriptive_outputs.Rmd`
+
+Fast R Markdown report for visualizing the aggregate CSV files created by `4.1_extract_2016_cfi_descriptive_outputs.R`. It does not connect to Redshift. It reads the saved `4.1_*.csv` files from `Outputs`, renders the frailty-group Table 1, CFI summary table, overall histogram, and box plots.
+
+Run this after `4.1_extract_2016_cfi_descriptive_outputs.R` has successfully generated the CSV files.

@@ -1,0 +1,333 @@
+---
+title: "2016 Claims-Based Frailty Index Descriptive Analysis"
+author: "Nemo Zhou"
+date: "2026-06-17"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+<!--
+Project: Frailty_Komoto 2016 CFI descriptive visualization
+Author: Nemo Zhou
+Date started: 2026-06-17
+Date last updated: 2026-06-18
+
+Purpose:
+This R Markdown report visualizes aggregate 2016 Claims-Based Frailty Index
+(CFI) descriptive outputs created by:
+Code/4.1_extract_2016_cfi_descriptive_outputs.R
+
+It does not connect to Redshift. It reads aggregate CSV files from the
+project-root Outputs folder and renders a frailty-group Table 1, CFI summary
+table, an overall histogram, and box plots.
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+
+library(ggplot2)
+library(knitr)
+```
+
+```{r helpers}
+output_dir_candidates <- c("Outputs", "../Outputs")
+output_dir <- output_dir_candidates[
+  dir.exists(output_dir_candidates)
+][1]
+
+if (is.na(output_dir)) {
+  stop(
+    "Could not find the project-root Outputs folder. ",
+    "Knit this report from the project root or the Code folder."
+  )
+}
+
+read_required_csv <- function(file_name) {
+  path <- file.path(output_dir, file_name)
+  if (!file.exists(path)) {
+    stop(
+      "Missing required file: ",
+      path,
+      ". Run Code/4.1_extract_2016_cfi_descriptive_outputs.R first."
+    )
+  }
+
+  utils::read.csv(path, stringsAsFactors = FALSE, check.names = FALSE)
+}
+
+metadata <- read_required_csv("4.1_cfi_2016_metadata.csv")
+
+metadata_value <- function(field) {
+  value <- metadata$value[metadata$field == field]
+  if (length(value) == 0L) {
+    return(NA_character_)
+  }
+  value[[1]]
+}
+
+comma_label <- function(x) {
+  format(
+    round(x),
+    big.mark = ",",
+    scientific = FALSE,
+    trim = TRUE
+  )
+}
+
+cfi_label <- function(x) {
+  sprintf("%.2f", x)
+}
+
+extract_count <- function(x) {
+  cleaned <- gsub(",", "", x)
+  cleaned <- sub(" .*", "", cleaned)
+  suppressWarnings(as.numeric(cleaned))
+}
+
+extract_percent <- function(x) {
+  ifelse(
+    grepl("\\(", x),
+    sub(".*\\(([^)]+)\\).*", "\\1", x),
+    x
+  )
+}
+
+format_percent_one_decimal <- function(x) {
+  percent_value <- suppressWarnings(
+    as.numeric(gsub("%", "", as.character(x)))
+  )
+
+  ifelse(
+    is.na(percent_value),
+    as.character(x),
+    paste0(sprintf("%.1f", percent_value), "%")
+  )
+}
+
+format_percent_columns <- function(data) {
+  percent_columns <- grepl("percent|percentage", names(data), ignore.case = TRUE)
+
+  for (column in names(data)[percent_columns]) {
+    data[[column]] <- format_percent_one_decimal(data[[column]])
+  }
+
+  data
+}
+
+format_numeric_columns <- function(data, columns, digits) {
+  for (column in intersect(columns, names(data))) {
+    numeric_value <- suppressWarnings(as.numeric(data[[column]]))
+    data[[column]] <- ifelse(
+      is.na(numeric_value),
+      as.character(data[[column]]),
+      sprintf(paste0("%.", digits, "f"), numeric_value)
+    )
+  }
+
+  data
+}
+
+format_table_one_percent_only <- function(data) {
+  frailty_columns <- setdiff(names(data), c("variable", "level"))
+
+  overall_row <- data[
+    data$variable == "Overall" & data$level == "Overall",
+    ,
+    drop = FALSE
+  ]
+
+  if (nrow(overall_row) == 1L) {
+    new_names <- names(data)
+    for (column in frailty_columns) {
+      count <- extract_count(overall_row[[column]])
+      if (!is.na(count) && !grepl("\\(N=", column, fixed = FALSE)) {
+        new_names[new_names == column] <- paste0(
+          column,
+          " (N=",
+          format(
+            round(count),
+            big.mark = ",",
+            scientific = FALSE,
+            trim = TRUE
+          ),
+          ")"
+        )
+      }
+    }
+    names(data) <- new_names
+    frailty_columns <- setdiff(names(data), c("variable", "level"))
+  }
+
+  for (column in frailty_columns) {
+    data[[column]] <- format_percent_one_decimal(extract_percent(data[[column]]))
+  }
+
+  data
+}
+```
+
+```{r read-data}
+table_one_display <- read_required_csv(
+  "4.1_cfi_2016_table1_by_frailty_group.csv"
+)
+table_one_display <- format_table_one_percent_only(table_one_display)
+
+subgroup_summary <- read_required_csv("4.1_cfi_2016_subgroup_summary.csv")
+if ("n_patient_years" %in% names(subgroup_summary)) {
+  names(subgroup_summary)[names(subgroup_summary) == "n_patient_years"] <- "n_patient"
+}
+subgroup_summary <- format_percent_columns(subgroup_summary)
+subgroup_summary <- format_numeric_columns(
+  subgroup_summary,
+  c(
+    "mean_cfi",
+    "minimum_cfi",
+    "q1_cfi",
+    "median_cfi",
+    "q3_cfi",
+    "maximum_cfi"
+  ),
+  digits = 3
+)
+
+histogram_data <- read_required_csv("4.1_cfi_2016_histogram_bins.csv")
+boxplot_data <- read_required_csv("4.1_cfi_2016_boxplot_statistics.csv")
+if ("n_patient_years" %in% names(boxplot_data)) {
+  names(boxplot_data)[names(boxplot_data) == "n_patient_years"] <- "n_patient"
+}
+```
+
+# Analysis Definitions
+
+The three frailty strata used for Table 1 are:
+
+- Non-frail: CFI `< 0.15`
+- Prefrail: CFI `0.15` to `< 0.25`
+- Frail: CFI `>= 0.25`
+
+Analysis year: `r metadata_value("analysis_year")`
+
+Minimum reported cell count: `r metadata_value("min_count")`
+
+Race/ethnicity source: `r metadata_value("race_source")`
+
+Histogram note: `r metadata_value("histogram_note")`
+
+# Table 1 By Frailty Group
+
+```{r table-one-display}
+knitr::kable(table_one_display)
+```
+
+# CFI Summary By Subgroup
+
+```{r subgroup-summary}
+knitr::kable(subgroup_summary)
+```
+
+# Histogram Of CFI
+
+```{r histogram-overall}
+histogram_overall <- histogram_data[histogram_data$stratifier == "Overall", ]
+histogram_x_min <- floor(min(histogram_overall$cfi_bin_start, na.rm = TRUE) * 100) / 100
+histogram_x_max <- ceiling(max(histogram_overall$cfi_bin_start, na.rm = TRUE) * 100) / 100
+
+ggplot(histogram_overall, aes(x = cfi_bin_start, y = n_patient_years)) +
+  geom_col(width = 0.01, fill = "#3F7C85", color = "white", linewidth = 0.1) +
+  scale_x_continuous(
+    labels = cfi_label,
+    breaks = seq(histogram_x_min, histogram_x_max, by = 0.05),
+    minor_breaks = seq(histogram_x_min, histogram_x_max, by = 0.01)
+  ) +
+  scale_y_continuous(labels = comma_label) +
+  labs(
+    title = "Distribution of 2016 CFI Scores",
+    x = "CFI score",
+    y = "Eligible patient-years"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+# Box Plot Of CFI
+
+```{r boxplot-overall}
+boxplot_overall <- boxplot_data[boxplot_data$stratifier == "Overall", ]
+overall_box_stats <- data.frame(
+  statistic = c("Min", "Q1", "Median", "Q3", "Max"),
+  value = as.numeric(boxplot_overall[, c("ymin", "lower", "middle", "upper", "ymax")])
+)
+overall_box_stats$label <- paste0(
+  overall_box_stats$statistic,
+  ": ",
+  sprintf("%.3f", overall_box_stats$value)
+)
+
+ggplot(
+  boxplot_overall,
+  aes(x = 1, ymin = ymin, lower = lower, middle = middle,
+      upper = upper, ymax = ymax)
+) +
+  geom_boxplot(stat = "identity", fill = "#D9A441", width = 0.45) +
+  geom_point(
+    data = overall_box_stats,
+    aes(x = 1, y = value),
+    inherit.aes = FALSE,
+    size = 2
+  ) +
+  geom_text(
+    data = overall_box_stats,
+    aes(x = 1.28, y = value, label = label),
+    inherit.aes = FALSE,
+    hjust = 0,
+    size = 3.3
+  ) +
+  scale_x_continuous(
+    breaks = 1,
+    labels = "Overall",
+    limits = c(0.65, 1.75)
+  ) +
+  labs(
+    title = "2016 CFI Score Distribution",
+    x = NULL,
+    y = "CFI score"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+```{r boxplot-by-stratifier}
+boxplot_by_stratifier <- boxplot_data[boxplot_data$stratifier != "Overall", ]
+
+ggplot(
+  boxplot_by_stratifier,
+  aes(x = reorder(stratum, middle), ymin = ymin, lower = lower,
+      middle = middle, upper = upper, ymax = ymax)
+) +
+  geom_boxplot(stat = "identity", fill = "#A44A3F", width = 0.5) +
+  coord_flip() +
+  facet_wrap(~ stratifier, scales = "free_y") +
+  labs(
+    title = "2016 CFI Score Distribution by Subgroup",
+    x = NULL,
+    y = "CFI score"
+  ) +
+  theme_minimal(base_size = 10)
+```
+
+# Source Files
+
+This report reads these aggregate CSV files from `Outputs`:
+
+- `4.1_cfi_2016_metadata.csv`
+- `4.1_cfi_2016_table1_by_frailty_group.csv`
+- `4.1_cfi_2016_subgroup_summary.csv`
+- `4.1_cfi_2016_histogram_bins.csv`
+- `4.1_cfi_2016_boxplot_statistics.csv`

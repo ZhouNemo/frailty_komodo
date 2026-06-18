@@ -1,7 +1,7 @@
 # If needed, install packages inside the OHDSI Lab project
 # renv::upgrade()
 # renv::install("roux-ohdsi/ohdsilab")
-# renv::install(c("dplyr", "keyring", "DBI"))
+# renv::install(c("dplyr", "keyring", "DBI","DatabaseConnector"))
 
 library(ohdsilab)
 library(DatabaseConnector)

@@ -19,8 +19,8 @@ library(DBI)
 #
 # Run after:
 #   Code/0.2_model_komodo_workflow.R
-#   Documents/ANNUAL_ELIGIBILITY_LOGIC.md
-#   Documents/PATIENT_CLOSED_AND_INSURANCE_STRUCTURE.md
+#   Documents/02_ANNUAL_ELIGIBILITY_LOGIC.md
+#   Documents/03_PATIENT_CLOSED_AND_INSURANCE_STRUCTURE.md
 #
 # Run before:
 #   Code/1.1_build_annual_eligible_population.R
