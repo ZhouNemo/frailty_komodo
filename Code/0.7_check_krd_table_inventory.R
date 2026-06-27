@@ -8,7 +8,7 @@ library(DBI)
 # Project: Frailty_Komoto KRD table inventory diagnostic
 # Author: Nemo Zhou
 # Date started: 2026-06-17
-# Date last updated: 2026-06-17
+# Date last updated: 2026-06-24
 #
 # ---- Purpose ----
 # List all visible Komodo Research Dataset tables in the configured Redshift
@@ -28,10 +28,10 @@ data_dictionary_path <- file.path(
   "Komodo Research Dataset Data Dictionary.xlsx - EXTERNAL FACING Data Dictionary.csv"
 )
 
-table_inventory_output <- file.path("Outputs", "0.6_krd_table_inventory.csv")
+table_inventory_output <- file.path("Outputs", "0.7_krd_table_inventory.csv")
 dictionary_comparison_output <- file.path(
   "Outputs",
-  "0.6_krd_table_dictionary_comparison.csv"
+  "0.7_krd_table_dictionary_comparison.csv"
 )
 
 # ---- Connect to Redshift ----

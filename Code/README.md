@@ -2,7 +2,7 @@
 
 This folder contains the R scripts used to connect to Komodo, prototype claims workflows, diagnose annual eligibility assumptions, build the annual eligible population, generate aggregate summaries, and prepare claims-based index inputs. Scripts should be run in numeric order unless a task-specific note says otherwise.
 
-Numeric order logic: 0.xx: code for testing/checking/diagnosis; 1.xx: code to generate the study sample; 2.xx: code to do summary analyses; 3.xx: code to prepare and calculate claims-based indices; 4.xx: code to report descriptive findings from prepared analysis tables
+Numeric order logic: 0.xx: code for testing/checking/diagnosis; 1.xx: code to generate the study sample; 2.xx: code to do summary analyses; 3.xx: existing CFI preparation and scoring workflows; 4.xx: existing CFI descriptive reporting from prepared analysis tables; 5.xx: planned shared clinical-metric processing for CFI, CCW, Gagne, and HIV, as specified in `Documents/01_CLINICAL_METRICS_DATA_PROCESSING_FLOW.md`.
 
 ## `0.1_connect to Komodo.R`
 
@@ -34,9 +34,15 @@ Small-sample structural diagnostic for `INPATIENT_EVENTS` and `NON_INPATIENT_EVE
 
 Run this before implementing the production CFI diagnosis and CPT/HCPCS extraction described in `Documents/04_INPATIENT_AND_NON_INPATIENT_EVENT_STRUCTURE.md`.
 
-## `0.6_check_krd_table_inventory.R`
+## `0.6_validate_clinical_metric_lookups.R`
 
-Schema-level diagnostic for listing all visible tables in the configured Komodo Redshift read schema, currently `komodo_ext`. It reads the project data dictionary, queries `information_schema.tables`, compares expected dictionary table names with visible Redshift table names, prints the results, and saves `0.6_krd_table_inventory.csv` and `0.6_krd_table_dictionary_comparison.csv` in `Outputs`.
+Local diagnostic and conversion script for the lookup inputs needed before annual clinical metric processing. It validates the CFI diagnosis/procedure/weight files, parses the supplied CCW SAS diagnosis rules into prefix-match rows, writes the diagnosis-only HIV lookup with the calendar-year claim-window rule, and converts the 20 Gagne SAS format datasets plus `comorb_weight.sas7bdat` into plain CSV lookups. The Gagne conversion preserves SAS format endpoint semantics, including prefix-like sentinel endpoints such as `I42:` or `425[` and exclusive range endpoints such as `C80[`. It writes lookup artifacts and a validation summary to `Documents/Clinical Metric Look Up Tables` and does not connect to Redshift or create persistent write-schema tables.
+
+Run this before shared annual diagnosis extraction. If the Gagne conversion reports that the `haven` package is missing, install it with `renv::install("haven")` and rerun this diagnostic before writing or running the Gagne scoring workflow.
+
+## `0.7_check_krd_table_inventory.R`
+
+Schema-level diagnostic for listing all visible tables in the configured Komodo Redshift read schema, currently `komodo_ext`. It reads the project data dictionary, queries `information_schema.tables`, compares expected dictionary table names with visible Redshift table names, prints the results, and saves `0.7_krd_table_inventory.csv` and `0.7_krd_table_dictionary_comparison.csv` in `Outputs`.
 
 Run this when checking available KRD table names or validating whether a documented table is accessible in the current OHDSI Lab workspace.
 
@@ -121,3 +127,51 @@ Run this after `1.3_join_race_ethnicity_to_eligible_cohort.R`, `3.3_compute_2016
 Fast R Markdown report for visualizing the aggregate CSV files created by `4.1_extract_2016_cfi_descriptive_outputs.R`. It does not connect to Redshift. It reads the saved `4.1_*.csv` files from `Outputs`, renders the frailty-group Table 1, CFI summary table, overall histogram, and box plots.
 
 Run this after `4.1_extract_2016_cfi_descriptive_outputs.R` has successfully generated the CSV files.
+
+## `5.1_prepare_2016_clinical_metric_matches.R`
+
+Validation wrapper for the shared clinical-metric matched-event workflow. It runs `5.2_prepare_annual_clinical_metric_matches.R` with a 2016-only configuration and writes the 2016 rows in `2_annual_metric_ids`, `2_annual_diagnosis_matches`, and `2_annual_procedure_matches`. It is the first Redshift extraction step for the new parallel CFI, CCW, Gagne combined comorbidity score, and HIV status rebuild, and it prints only aggregate QA.
+
+Run this after `0.6_validate_clinical_metric_lookups.R`, `1.1_build_annual_eligible_population.R`, `1.2_check_annual_eligible_population.R`, and `1.3_join_race_ethnicity_to_eligible_cohort.R`.
+
+## `5.2_prepare_annual_clinical_metric_matches.R`
+
+Reusable year-batched engine for preparing the shared clinical-metric matched-event layer. It stages the validated local lookup CSVs in temporary Redshift tables, refreshes selected years in `2_annual_metric_ids`, scans eligible inpatient and non-inpatient events one year at a time, applies conservative lookup-derived candidate prefilters before array flattening when safe, normalizes extracted codes, and persists only final exact, prefix, or range feature matches in `2_annual_diagnosis_matches` and `2_annual_procedure_matches`.
+
+Run `5.1_prepare_2016_clinical_metric_matches.R` successfully before using this script for additional years. Downstream scripts should score CFI, CCW, Gagne, and HIV from these matched-event tables rather than rescanning or reflattening raw diagnosis/procedure events.
+
+## `5.3_calculate_annual_cfi_scores.R`
+
+Annual shared-pipeline CFI scoring script. It consumes `2_annual_metric_ids`, `2_annual_diagnosis_matches`, `2_annual_procedure_matches`, and `0.6_cfi_weight_lookup.csv`, keeps each CFI feature once per patient-year, adds the `0.10288` CFI intercept, and writes one row per eligible patient-year to `annual_cfi_scores`. The default run is 2016 only.
+
+Run this after `5.1_prepare_2016_clinical_metric_matches.R` has created the matched-event tables.
+
+## `5.4_calculate_annual_ccw_variables.R`
+
+Annual shared-pipeline CCW variable script. It consumes `2_annual_diagnosis_matches` and `0.6_ccw_diagnosis_lookup.csv`, creates the long matched condition table, one wide 56-condition indicator table, and the reviewed CCW group-count table. It writes `annual_ccw_conditions_long`, `annual_ccw_condition_indicators`, and `annual_ccw_group_counts`. The default run is 2016 only.
+
+Run this after `5.1_prepare_2016_clinical_metric_matches.R`.
+
+## `5.5_calculate_annual_gagne_comorbidity_score.R`
+
+Annual shared-pipeline Gagne combined comorbidity score script. It consumes `2_annual_diagnosis_matches`, `0.6_gagne_diagnosis_lookup.csv`, and `0.6_gagne_weight_lookup.csv`, keeps each Gagne group once per patient-year, creates all 20 group indicators, and writes `annual_gagne_scores`. Patients with no matched Gagne group receive score zero. The default run is 2016 only.
+
+Run this after `5.1_prepare_2016_clinical_metric_matches.R`.
+
+## `5.6_calculate_annual_hiv_status.R`
+
+Annual shared-pipeline HIV status script. It consumes `2_annual_diagnosis_matches` and `0.6_hiv_diagnosis_lookup.csv`, applies the annual-only confirmation rule directly in SQL, and writes `annual_hiv_status`. HIV status is one for at least one inpatient HIV diagnosis match or at least two distinct non-inpatient HIV diagnosis dates in the same patient-year; status is not carried forward. The default run is 2016 only.
+
+Run this after `5.1_prepare_2016_clinical_metric_matches.R`.
+
+## `5.7_build_annual_clinical_metrics.R`
+
+Final shared annual clinical-metrics table builder. It joins `2_annual_metric_ids` to completed CFI, CCW, Gagne, and HIV outputs and writes one row per eligible patient-year to `annual_clinical_metrics_shared`. It discovers the wide CCW and Gagne indicator columns from the upstream tables rather than hard-coding them. The default run is 2016 only.
+
+Run this after `5.3`, `5.4`, `5.5`, and `5.6` have completed successfully.
+
+## `5.8_check_annual_clinical_metrics.R`
+
+Aggregate QA script for the shared annual clinical-metric pipeline. It checks selected-year row counts, duplicate keys, matched-event counts, CFI intercept flags, CCW and Gagne indicator counts, HIV confirmation-rule consistency, and final-table completeness. It writes aggregate results to `Outputs/5.8_annual_clinical_metrics_qa.csv`.
+
+Run this after `5.7_build_annual_clinical_metrics.R`.

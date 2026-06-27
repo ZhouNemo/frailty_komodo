@@ -5,6 +5,11 @@ library(dbplyr)
 library(keyring)
 library(DBI)
 
+# Project: Frailty_Komoto annual eligibility QA
+# Author: Nemo Zhou
+# Date started: 2026-06-03
+# Date last updated: 2026-06-27
+#
 # ---- Purpose ----
 # QA checks for the annual eligible population table created by:
 # Code/1.1_build_annual_eligible_population.R
@@ -18,6 +23,7 @@ komodo_schema <- "komodo_ext"
 write_schema <- paste0("work_", keyring::key_get("db_username"))
 eligibility_table <- "1_annual_eligible_cohort"
 min_count <- 11L
+min_age <- 40L
 
 # ---- Connect to Redshift ----
 con <- ohdsilab_connect(
@@ -171,6 +177,13 @@ unexpected_insurance_values <- eligible_population |>
 
 print(unexpected_insurance_values)
 
+if (any(unlist(unexpected_insurance_values) > 0, na.rm = TRUE)) {
+  stop(
+    "Eligibility table has missing or UNKNOWN insurance classifications; ",
+    "rebuild with Code/1.1_build_annual_eligible_population.R."
+  )
+}
+
 # ---- Check age range by year ----
 message("Checking age range by analysis year.")
 
@@ -186,5 +199,9 @@ age_summary <- eligible_population |>
   collect()
 
 print(age_summary)
+
+if (any(age_summary$min_age < min_age, na.rm = TRUE)) {
+  stop("Eligibility table contains ages below the minimum age of ", min_age, ".")
+}
 
 message("QA checks complete.")

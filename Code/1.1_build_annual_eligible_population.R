@@ -8,10 +8,11 @@ library(DBI)
 # Project: Frailty_Komoto annual eligibility
 # Author: Nemo Zhou
 # Date started: 2026-06-03
-# Date last updated: 2026-06-04
+# Date last updated: 2026-06-27
 #
 # ---- Purpose ----
-# Annual eligibility builder for CFI, CCI, CCW, and polypharmacy analyses.
+# Annual eligibility builder for CFI, Gagne's combined comorbidity score, CCW,
+# and polypharmacy analyses.
 # This script builds one annual eligible population table in the user's
 # Redshift write schema using age, full-year insurance attribution, stable
 # primary Mx/Rx insurance group and segment, and stable optional secondary
@@ -31,7 +32,12 @@ write_schema <- paste0("work_", keyring::key_get("db_username"))
 # ---- Study parameters ----
 # Update these values for the final study protocol.
 min_age <- 40L
+# Fixed project analysis window (see Documents/01_CLINICAL_METRICS_DATA_PROCESSING_FLOW.md,
+# Stage 1). Years are not derived dynamically from the data release date.
+study_start_year <- 2016L
+study_end_year <- 2025L
 eligibility_table <- "1_annual_eligible_cohort"
+eligibility_without_race_table <- "1_annual_eligible_cohort_without_race"
 
 # ---- Connect to Redshift ----
 con <- ohdsilab_connect(
@@ -54,6 +60,12 @@ eligibility_table_identifier <- paste(
   sep = "."
 )
 
+eligibility_without_race_table_identifier <- paste(
+  quote_identifier(write_schema),
+  quote_identifier(eligibility_without_race_table),
+  sep = "."
+)
+
 # ---- Build SQL for the annual eligibility table ----
 # The SQL first defines year-specific denominators, then checks:
 # age, full-year insurance attribution, and stable non-missing medical and
@@ -61,29 +73,17 @@ eligibility_table_identifier <- paste(
 # PATIENT_CLOSED coverage.
 eligibility_sql <- paste0(
   "DROP TABLE IF EXISTS ", eligibility_table_identifier, ";
+/* Invalidate any stale race archive so 1.3 re-archives from this fresh build. */
+DROP TABLE IF EXISTS ", eligibility_without_race_table_identifier, ";
 CREATE TABLE ", eligibility_table_identifier, " AS
-/* Analysis years observed in PATIENT_INSURANCE. */
-WITH RECURSIVE insurance_year_range AS (
-  SELECT
-    DATE_PART('year', MIN(row_valid_start))::INTEGER AS min_year,
-    DATE_PART('year', MAX(row_valid_end))::INTEGER AS max_year
-  FROM ", komodo_schema, ".patient_insurance
-  WHERE row_valid_start IS NOT NULL
-    AND row_valid_end IS NOT NULL
-),
-analysis_years(analysis_year, max_year) AS (
-  SELECT
-    min_year AS analysis_year,
-    max_year
-  FROM insurance_year_range
-  WHERE min_year IS NOT NULL
-    AND max_year IS NOT NULL
+/* Fixed project analysis years (see Documents/01, Stage 1), not data-derived. */
+WITH RECURSIVE analysis_years(analysis_year) AS (
+  SELECT ", study_start_year, "
   UNION ALL
   SELECT
-    analysis_year + 1 AS analysis_year,
-    max_year
+    analysis_year + 1
   FROM analysis_years
-  WHERE analysis_year < max_year
+  WHERE analysis_year < ", study_end_year, "
 ),
 /* Calendar-year start and end dates for each analysis year. */
 year_bounds AS (
@@ -248,9 +248,38 @@ INNER JOIN insurance_eligible i
  AND d.analysis_year = i.analysis_year"
 )
 
+# ---- Confirm PATIENT_INSURANCE spans the fixed analysis window ----
+# Fail clearly if the fixed analysis years cannot be constructed (Documents/01, Stage 1).
+insurance_coverage <- DBI::dbGetQuery(
+  con,
+  paste0(
+    "SELECT
+       DATE_PART('year', MIN(row_valid_start))::INTEGER AS min_year,
+       DATE_PART('year', MAX(row_valid_end))::INTEGER AS max_year
+     FROM ", komodo_schema, ".patient_insurance
+     WHERE row_valid_start IS NOT NULL
+       AND row_valid_end IS NOT NULL"
+  )
+)
+
+if (
+  nrow(insurance_coverage) != 1L ||
+    is.na(insurance_coverage$min_year[[1]]) ||
+    is.na(insurance_coverage$max_year[[1]]) ||
+    insurance_coverage$min_year[[1]] > study_start_year ||
+    insurance_coverage$max_year[[1]] < study_end_year
+) {
+  stop(
+    "PATIENT_INSURANCE coverage (",
+    insurance_coverage$min_year[[1]], "-", insurance_coverage$max_year[[1]],
+    ") does not span the fixed analysis window ",
+    study_start_year, "-", study_end_year, "."
+  )
+}
+
 # ---- Materialize annual eligibility table ----
 message("Creating annual eligibility table: ", write_schema, ".", eligibility_table)
-message("Analysis years are derived dynamically from PATIENT_INSURANCE.")
+message("Fixed analysis years: ", study_start_year, "-", study_end_year, ".")
 message("Minimum age on January 1: ", min_age)
 
 DatabaseConnector::executeSql(con, eligibility_sql)

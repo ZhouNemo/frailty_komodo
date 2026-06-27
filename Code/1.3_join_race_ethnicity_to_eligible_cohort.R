@@ -8,7 +8,7 @@ library(DBI)
 # Project: Frailty_Komoto annual eligibility
 # Author: Nemo Zhou
 # Date started: 2026-06-17
-# Date last updated: 2026-06-17
+# Date last updated: 2026-06-24
 #
 # ---- Purpose ----
 # Join the recommended KRD patient-level race/ethnicity variable onto the
@@ -122,7 +122,7 @@ if (!table_is_accessible(komodo_schema, race_table)) {
     komodo_schema,
     ".",
     race_table,
-    ". Confirm table availability with Code/0.6_check_krd_table_inventory.R."
+    ". Confirm table availability with Code/0.7_check_krd_table_inventory.R."
   )
 }
 
