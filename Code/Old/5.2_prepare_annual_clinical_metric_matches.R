@@ -6,7 +6,7 @@ library(DBI)
 # Project: Frailty_Komoto annual shared clinical metric matching
 # Author: Nemo Zhou
 # Date started: 2026-06-27
-# Date last updated: 2026-06-27
+# Date last updated: 2026-06-28
 #
 # ---- Purpose ----
 # Build the shared matched-event layer for annual clinical metric processing.
@@ -15,10 +15,14 @@ library(DBI)
 # status. Metric scoring is intentionally left to downstream 5.x scripts.
 #
 # The script processes selected years one at a time to limit Redshift temporary
-# disk pressure. Each run deletes and replaces only the selected years in:
+# disk pressure. By default, each run deletes and replaces only the selected
+# years in:
 #   - 2_annual_metric_ids
 #   - 2_annual_diagnosis_matches
 #   - 2_annual_procedure_matches
+#
+# Set refresh_metric_ids = FALSE in frailty.clinical_metrics.config only when
+# the selected 2_annual_metric_ids rows already exist and should be reused.
 #
 # Code/5.1_prepare_2016_clinical_metric_matches.R calls this engine with a
 # 2016-only configuration. Patient-level matched events remain in Redshift. Only
@@ -34,6 +38,8 @@ library(DBI)
 #   [year_start, year_end_exclusive). The shared match tables therefore hold
 #   same-year evidence only. A future multi-year (pre-index) lookback cannot be
 #   recovered from these tables and would require a separate extraction.
+#   Diagnostic wrappers may pass event_start_date and event_end_date to test a
+#   smaller event-date window inside the selected analysis year.
 # - Date columns in 2_annual_metric_ids map to the metric-document language as:
 #     analysis_start_date = year_start
 #     analysis_end_date   = year_end_exclusive - 1 day (inclusive December 31)
@@ -55,6 +61,9 @@ default_clinical_metric_config <- list(
   diagnosis_matches_table = "2_annual_diagnosis_matches",
   procedure_matches_table = "2_annual_procedure_matches",
   workflow_label = "annual production",
+  refresh_metric_ids = TRUE,
+  event_start_date = NULL,
+  event_end_date = NULL,
   # The array candidate prefilter is purely a performance row-reduction step.
   # It is disabled by default so it can never silently drop a true match. Only
   # re-enable it after measuring its row-reduction benefit and confirming a
@@ -76,6 +85,8 @@ analysis_years <- sort(unique(as.integer(
   clinical_metric_config$analysis_years
 )))
 id_years <- sort(unique(as.integer(clinical_metric_config$id_years)))
+event_start_date <- clinical_metric_config$event_start_date
+event_end_date <- clinical_metric_config$event_end_date
 
 if (
   length(analysis_years) == 0L ||
@@ -96,10 +107,30 @@ if (
   )
 }
 
+if (xor(is.null(event_start_date), is.null(event_end_date))) {
+  stop(
+    "event_start_date and event_end_date must either both be NULL or both be set."
+  )
+}
+
+if (!is.null(event_start_date)) {
+  event_start_date <- as.Date(event_start_date)
+  event_end_date <- as.Date(event_end_date)
+
+  if (
+    is.na(event_start_date) ||
+      is.na(event_end_date) ||
+      event_start_date >= event_end_date
+  ) {
+    stop("event_start_date must be earlier than event_end_date.")
+  }
+}
+
 eligibility_table <- clinical_metric_config$eligibility_table
 ids_table <- clinical_metric_config$ids_table
 diagnosis_matches_table <- clinical_metric_config$diagnosis_matches_table
 procedure_matches_table <- clinical_metric_config$procedure_matches_table
+refresh_metric_ids <- isTRUE(clinical_metric_config$refresh_metric_ids)
 enable_candidate_prefilter <- isTRUE(
   clinical_metric_config$enable_candidate_prefilter
 )
@@ -994,6 +1025,16 @@ if (length(missing_years) > 0L) {
 print(eligible_year_counts)
 
 # ---- Initialize outputs and temporary lookup tables ----
+if (!refresh_metric_ids && !table_exists(write_schema, ids_table)) {
+  stop(
+    "refresh_metric_ids is FALSE, but ",
+    write_schema,
+    ".",
+    ids_table,
+    " does not exist."
+  )
+}
+
 ensure_ids_table(ids_identifier)
 ensure_diagnosis_matches_table(diagnosis_matches_identifier)
 ensure_procedure_matches_table(procedure_matches_identifier)
@@ -1017,11 +1058,12 @@ prefilter_summary <- data.frame(
 )
 print(prefilter_summary)
 
-# ---- Materialize or refresh the configured metric ID population ----
-DatabaseConnector::executeSql(
-  con,
-  paste0(
-    "DELETE FROM ", ids_identifier, "
+# ---- Materialize, refresh, or validate the configured metric ID population ----
+if (refresh_metric_ids) {
+  DatabaseConnector::executeSql(
+    con,
+    paste0(
+      "DELETE FROM ", ids_identifier, "
      WHERE analysis_year IN (", sql_values(id_years), ");
 
      INSERT INTO ", ids_identifier, " (
@@ -1066,8 +1108,17 @@ DatabaseConnector::executeSql(
      FROM ", eligibility_identifier, " e
      WHERE e.analysis_year IN (", sql_values(id_years), ")
        AND e.patient_id IS NOT NULL;"
+    )
   )
-)
+} else {
+  message(
+    "Reusing existing ",
+    ids_table,
+    " rows for selected years: ",
+    paste(id_years, collapse = ", "),
+    "."
+  )
+}
 
 id_integrity <- print_query(
   "Checking 2_annual_metric_ids integrity for selected years.",
@@ -1090,10 +1141,53 @@ if (
   stop("The configured 2_annual_metric_ids table failed its integrity check.")
 }
 
+id_year_integrity <- print_query(
+  "Checking 2_annual_metric_ids year coverage.",
+  paste0(
+    "SELECT
+       analysis_year,
+       COUNT(*)::BIGINT AS n_rows
+     FROM ", ids_identifier, "
+     WHERE analysis_year IN (", sql_values(id_years), ")
+     GROUP BY analysis_year
+     ORDER BY analysis_year"
+  )
+)
+
+missing_id_years <- setdiff(id_years, id_year_integrity$analysis_year)
+if (length(missing_id_years) > 0L) {
+  stop(
+    "The configured 2_annual_metric_ids table has no rows for selected years: ",
+    paste(missing_id_years, collapse = ", "),
+    "."
+  )
+}
+
 # ---- Process one year at a time ----
 for (analysis_year in analysis_years) {
   year_start <- paste0(analysis_year, "-01-01")
   year_end <- paste0(analysis_year + 1L, "-01-01")
+  event_window_start <- year_start
+  event_window_end <- year_end
+
+  if (!is.null(event_start_date)) {
+    year_start_date <- as.Date(year_start)
+    year_end_date <- as.Date(year_end)
+
+    if (
+      event_start_date < year_start_date ||
+        event_end_date > year_end_date
+    ) {
+      stop(
+        "Configured event date window must stay within analysis year ",
+        analysis_year,
+        "."
+      )
+    }
+
+    event_window_start <- as.character(event_start_date)
+    event_window_end <- as.character(event_end_date)
+  }
 
   message(
     "Starting ",
@@ -1102,6 +1196,14 @@ for (analysis_year in analysis_years) {
     match(analysis_year, analysis_years),
     " of ",
     length(analysis_years),
+    ")."
+  )
+
+  message(
+    "Event date window: [",
+    event_window_start,
+    ", ",
+    event_window_end,
     ")."
   )
 
@@ -1129,8 +1231,8 @@ for (analysis_year in analysis_years) {
     quote_identifier("inpatient_events"),
     " i
        ON ids.patient_id = i.patient_id
-     WHERE i.claim_from_date >= ", sql_string(year_start), "::DATE
-       AND i.claim_from_date < ", sql_string(year_end), "::DATE;
+     WHERE i.claim_from_date >= ", sql_string(event_window_start), "::DATE
+       AND i.claim_from_date < ", sql_string(event_window_end), "::DATE;
 
      CREATE TEMP TABLE ", quote_identifier(non_inpatient_stage_table), "
      DISTKEY(patient_id)
@@ -1151,8 +1253,8 @@ for (analysis_year in analysis_years) {
     quote_identifier("non_inpatient_events"),
     " n
        ON ids.patient_id = n.patient_id
-     WHERE n.service_date >= ", sql_string(year_start), "::DATE
-       AND n.service_date < ", sql_string(year_end), "::DATE;"
+     WHERE n.service_date >= ", sql_string(event_window_start), "::DATE
+       AND n.service_date < ", sql_string(event_window_end), "::DATE;"
   )
 
   message("Creating ", analysis_year, " restricted event staging tables.")
@@ -1711,9 +1813,10 @@ message(
   " shared clinical metric matching complete. Tables updated in ",
   write_schema,
   ": ",
-  paste(
-    c(ids_table, diagnosis_matches_table, procedure_matches_table),
-    collapse = ", "
-  ),
+  paste(c(
+    if (refresh_metric_ids) ids_table else paste0(ids_table, " reused"),
+    diagnosis_matches_table,
+    procedure_matches_table
+  ), collapse = ", "),
   "."
 )
