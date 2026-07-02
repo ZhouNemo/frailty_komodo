@@ -1,25 +1,27 @@
-source("Code/6.0_normalized_clinical_metrics_helpers.R")
+source("Code/3.0_normalized_clinical_metrics_helpers.R")
 
 # Project: Frailty_Komoto normalized annual clinical metrics QA
 # Author: Nemo Zhou
 # Date started: 2026-06-30
-# Date last updated: 2026-06-30
+# Date last updated: 2026-07-02
 #
 # ---- Purpose ----
-# Run aggregate QA for the normalized 6.x clinical-metrics pipeline. The checks
+# Run aggregate QA for the normalized 3.x clinical-metrics pipeline. The checks
 # validate source table schemas, selected-year output completeness, duplicate
-# keys, compact code/match counts, HIV confirmation consistency, and final-table
-# completeness. Patient-level rows are not printed.
+# keys, compact lookup-filtered match counts, HIV confirmation consistency, and
+# final-table completeness. Patient-level rows are not printed.
 
 config <- get_normalized_clinical_metrics_config()
 con <- connect_komodo()
+# Do NOT register on.exit(disconnect_komodo(con)) here. At the top level of a
+# source()d script, on.exit() fires early and closes the connection before the
+# script can query it. The connection is disconnected explicitly at the end.
 
 if (!dir.exists(config$output_dir)) {
   dir.create(config$output_dir, recursive = TRUE)
 }
 
 ids_identifier <- qualified_identifier(write_schema, config$ids_table)
-diagnosis_presence_identifier <- qualified_identifier(write_schema, config$diagnosis_presence_table)
 procedure_presence_identifier <- qualified_identifier(write_schema, config$procedure_presence_table)
 hiv_evidence_identifier <- qualified_identifier(write_schema, config$hiv_evidence_table)
 cfi_matches_identifier <- qualified_identifier(write_schema, config$cfi_feature_matches_table)
@@ -49,7 +51,6 @@ table_has_columns(
 
 required_write_tables <- c(
   config$ids_table,
-  config$diagnosis_presence_table,
   config$procedure_presence_table,
   config$hiv_evidence_table,
   config$cfi_feature_matches_table,
@@ -99,14 +100,7 @@ qa_results$denominator <- DBI::dbGetQuery(
 qa_results$code_presence <- DBI::dbGetQuery(
   con,
   paste0(
-    "SELECT 'diagnosis_code_presence' AS qa_check, analysis_year,
-       COUNT(*)::BIGINT AS n_rows,
-       COUNT(DISTINCT patid)::BIGINT AS n_patient_years
-     FROM ", diagnosis_presence_identifier, "
-     WHERE analysis_year IN (", sql_values(config$analysis_years), ")
-     GROUP BY analysis_year
-     UNION ALL
-     SELECT 'procedure_code_presence' AS qa_check, analysis_year,
+    "SELECT 'procedure_code_presence' AS qa_check, analysis_year,
        COUNT(*)::BIGINT AS n_rows,
        COUNT(DISTINCT patid)::BIGINT AS n_patient_years
      FROM ", procedure_presence_identifier, "
@@ -184,13 +178,7 @@ qa_results$final_completeness <- DBI::dbGetQuery(
 qa_results$duplicates <- DBI::dbGetQuery(
   con,
   paste0(
-    "SELECT 'diagnosis_code_presence' AS qa_check,
-       COUNT(*) - COUNT(DISTINCT patid || '|' || analysis_year::VARCHAR || '|' || dx_code)
-         AS duplicate_rows
-     FROM ", diagnosis_presence_identifier, "
-     WHERE analysis_year IN (", sql_values(config$analysis_years), ")
-     UNION ALL
-     SELECT 'procedure_code_presence' AS qa_check,
+    "SELECT 'procedure_code_presence' AS qa_check,
        COUNT(*) - COUNT(DISTINCT patid || '|' || analysis_year::VARCHAR || '|' || procedure_code)
          AS duplicate_rows
      FROM ", procedure_presence_identifier, "
@@ -261,6 +249,7 @@ qa_frames <- lapply(
   function(name) {
     data <- qa_results[[name]]
     data$qa_section <- name
+    data[] <- lapply(data, as.character)
     data
   }
 )
@@ -270,14 +259,14 @@ qa_frames <- lapply(
   function(data) {
     missing_columns <- setdiff(all_columns, names(data))
     for (column in missing_columns) {
-      data[[column]] <- NA
+      data[[column]] <- NA_character_
     }
     data[, all_columns, drop = FALSE]
   }
 )
 qa_output <- do.call(rbind, qa_frames)
 
-qa_path <- file.path(config$output_dir, "6.12_normalized_annual_clinical_metrics_qa.csv")
+qa_path <- file.path(config$output_dir, "3.12_normalized_annual_clinical_metrics_qa.csv")
 utils::write.csv(qa_output, qa_path, row.names = FALSE)
 
 message(
@@ -285,3 +274,8 @@ message(
   " QA complete. Aggregate QA written to: ",
   qa_path
 )
+
+# Release the Redshift connection now that the script has completed.
+disconnect_komodo(con)
+
+

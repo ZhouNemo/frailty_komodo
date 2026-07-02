@@ -1,9 +1,9 @@
-source("Code/6.0_normalized_clinical_metrics_helpers.R")
+source("Code/3.0_normalized_clinical_metrics_helpers.R")
 
 # Project: Frailty_Komoto normalized annual clinical metrics
 # Author: Nemo Zhou
 # Date started: 2026-06-30
-# Date last updated: 2026-06-30
+# Date last updated: 2026-07-02
 #
 # ---- Purpose ----
 # Prepare or validate the shared patient-year denominator for the normalized
@@ -16,6 +16,9 @@ source("Code/6.0_normalized_clinical_metrics_helpers.R")
 
 config <- get_normalized_clinical_metrics_config()
 con <- connect_komodo()
+# Do NOT register on.exit(disconnect_komodo(con)) here. At the top level of a
+# source()d script, on.exit() fires early and closes the connection before the
+# script can query it. The connection is disconnected explicitly at the end.
 
 eligibility_identifier <- qualified_identifier(write_schema, config$eligibility_table)
 ids_identifier <- qualified_identifier(write_schema, config$ids_table)
@@ -232,3 +235,8 @@ message(
   config$ids_table,
   "."
 )
+
+# Release the Redshift connection now that the script has completed.
+disconnect_komodo(con)
+
+

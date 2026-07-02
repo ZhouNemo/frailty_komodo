@@ -1,12 +1,12 @@
-source("Code/6.0_normalized_clinical_metrics_helpers.R")
+source("Code/3.0_normalized_clinical_metrics_helpers.R")
 
 # Project: Frailty_Komoto normalized annual clinical metrics table
 # Author: Nemo Zhou
 # Date started: 2026-06-30
-# Date last updated: 2026-06-30
+# Date last updated: 2026-07-02
 #
 # ---- Purpose ----
-# Build the final normalized annual clinical metrics table from the 6.x metric
+# Build the final normalized annual clinical metrics table from the 3.x metric
 # outputs. This script points the validated final-table builder archived under
 # `Code/Old` at:
 #   - 6_annual_clinical_metrics_shared
@@ -29,7 +29,12 @@ options(
 
 tryCatch(
   source("Code/Old/5.7_build_annual_clinical_metrics.R"),
-  finally = options(
-    "frailty.clinical_metrics.config" = previous_clinical_metric_config
-  )
+  finally = {
+    options("frailty.clinical_metrics.config" = previous_clinical_metric_config)
+    if (exists("con", inherits = FALSE)) {
+      disconnect_komodo(con)
+    }
+  }
 )
+
+

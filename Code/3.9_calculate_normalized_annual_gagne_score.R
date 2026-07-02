@@ -1,12 +1,12 @@
-source("Code/6.0_normalized_clinical_metrics_helpers.R")
+source("Code/3.0_normalized_clinical_metrics_helpers.R")
 
 # Project: Frailty_Komoto normalized annual Gagne score
 # Author: Nemo Zhou
 # Date started: 2026-06-30
-# Date last updated: 2026-06-30
+# Date last updated: 2026-07-02
 #
 # ---- Purpose ----
-# Calculate Gagne combined comorbidity scores for the normalized 6.x pipeline
+# Calculate Gagne combined comorbidity scores for the normalized 3.x pipeline
 # from compact Gagne feature matches. This script points the validated shared
 # scoring engine archived under `Code/Old` at:
 #   - 2_annual_gagne_group_matches
@@ -27,7 +27,12 @@ options(
 
 tryCatch(
   source("Code/Old/5.5_calculate_annual_gagne_comorbidity_score.R"),
-  finally = options(
-    "frailty.clinical_metrics.config" = previous_clinical_metric_config
-  )
+  finally = {
+    options("frailty.clinical_metrics.config" = previous_clinical_metric_config)
+    if (exists("con", inherits = FALSE)) {
+      disconnect_komodo(con)
+    }
+  }
 )
+
+

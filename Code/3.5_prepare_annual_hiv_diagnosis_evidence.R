@@ -1,9 +1,9 @@
-source("Code/6.0_normalized_clinical_metrics_helpers.R")
+source("Code/3.0_normalized_clinical_metrics_helpers.R")
 
 # Project: Frailty_Komoto normalized annual clinical metrics
 # Author: Nemo Zhou
 # Date started: 2026-06-30
-# Date last updated: 2026-06-30
+# Date last updated: 2026-07-02
 #
 # ---- Purpose ----
 # Build compact annual HIV diagnosis evidence from
@@ -14,6 +14,9 @@ source("Code/6.0_normalized_clinical_metrics_helpers.R")
 
 config <- get_normalized_clinical_metrics_config()
 con <- connect_komodo()
+# Do NOT register on.exit(disconnect_komodo(con)) here. At the top level of a
+# source()d script, on.exit() fires early and closes the connection before the
+# script can query it. The connection is disconnected explicitly at the end.
 
 ids_identifier <- qualified_identifier(write_schema, config$ids_table)
 dx_identifier <- qualified_identifier(komodo_schema, config$normalized_dx_table)
@@ -134,14 +137,9 @@ table_has_columns(
   )
 )
 
-dx_window_sql <- gsub(
-  "event_date",
-  "CAST(dx.event_date AS DATE)",
-  event_window_sql(config, "ids"),
-  fixed = TRUE
-)
+dx_window_sql <- event_window_sql(config, "ids", "dx.event_date")
 
-DatabaseConnector::executeSql(
+execute_sql_with_retry(
   con,
   paste0(
     "DELETE FROM ", hiv_evidence_identifier, "
@@ -166,7 +164,6 @@ DatabaseConnector::executeSql(
        CASE
          WHEN dx.source_table = 'INPATIENT_EVENTS' THEN 'inpatient'
          WHEN dx.source_table = 'NON_INPATIENT_EVENTS' THEN 'non_inpatient'
-         ELSE 'unknown'
        END AS claim_setting,
        dx.dx_code,
        l.metric,
@@ -182,7 +179,8 @@ DatabaseConnector::executeSql(
      WHERE ids.analysis_year IN (", sql_values(config$analysis_years), ")
        AND ", dx_window_sql, "
        AND dx.source_table IN ('INPATIENT_EVENTS', 'NON_INPATIENT_EVENTS');"
-  )
+  ),
+  label = "HIV diagnosis evidence scan"
 )
 
 print_query(
@@ -210,3 +208,8 @@ message(
   config$hiv_evidence_table,
   "."
 )
+
+# Release the Redshift connection now that the script has completed.
+disconnect_komodo(con)
+
+

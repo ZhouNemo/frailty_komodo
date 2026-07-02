@@ -1,12 +1,12 @@
-source("Code/6.0_normalized_clinical_metrics_helpers.R")
+source("Code/3.0_normalized_clinical_metrics_helpers.R")
 
 # Project: Frailty_Komoto normalized annual CCW variables
 # Author: Nemo Zhou
 # Date started: 2026-06-30
-# Date last updated: 2026-06-30
+# Date last updated: 2026-07-02
 #
 # ---- Purpose ----
-# Calculate CCW variables for the normalized 6.x pipeline from compact CCW
+# Calculate CCW variables for the normalized 3.x pipeline from compact CCW
 # feature matches. This script points the validated shared scoring engine
 # archived under `Code/Old` at:
 #   - 2_annual_ccw_condition_matches
@@ -31,7 +31,12 @@ options(
 
 tryCatch(
   source("Code/Old/5.4_calculate_annual_ccw_variables.R"),
-  finally = options(
-    "frailty.clinical_metrics.config" = previous_clinical_metric_config
-  )
+  finally = {
+    options("frailty.clinical_metrics.config" = previous_clinical_metric_config)
+    if (exists("con", inherits = FALSE)) {
+      disconnect_komodo(con)
+    }
+  }
 )
+
+
