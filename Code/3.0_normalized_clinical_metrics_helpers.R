@@ -6,7 +6,7 @@ library(DBI)
 # Project: Frailty_Komoto normalized annual clinical metrics
 # Author: Nemo Zhou
 # Date started: 2026-06-30
-# Date last updated: 2026-07-02
+# Date last updated: 2026-07-04
 #
 # ---- Purpose ----
 # Provide shared configuration, connection, SQL quoting, CSV loading, and table
@@ -302,7 +302,7 @@ execute_insert_batches <- function(
                 if (is.na(value)) {
                   "NULL"
                 } else if (column %in% numeric_columns) {
-                  value
+                  as.character(value)
                 } else {
                   sql_string(value)
                 }

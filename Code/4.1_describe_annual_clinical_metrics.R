@@ -5,7 +5,7 @@ suppressPackageStartupMessages(library(ggplot2))
 # Project: Frailty_Komoto annual clinical metrics descriptive analysis
 # Author: Nemo Zhou
 # Date started: 2026-07-02
-# Date last updated: 2026-07-02
+# Date last updated: 2026-07-03
 #
 # ---- Purpose ----
 # Generate aggregate descriptive summaries and plots for the normalized annual
@@ -22,10 +22,13 @@ cfi_frail_cutpoint <- 0.25
 cfi_histogram_bin_width <- 0.01
 gagne_histogram_bin_width <- 1
 
-descriptive_dir <- file.path(
-  config$output_dir,
-  "4.1_annual_clinical_metrics_descriptive"
-)
+descriptive_dir <- config$descriptive_output_dir
+if (is.null(descriptive_dir) || !nzchar(descriptive_dir)) {
+  descriptive_dir <- file.path(
+    config$output_dir,
+    "4.1_annual_clinical_metrics_descriptive"
+  )
+}
 if (!dir.exists(descriptive_dir)) {
   dir.create(descriptive_dir, recursive = TRUE)
 }
@@ -135,9 +138,14 @@ plot_box_summary <- function(data, metric_label, filename) {
     return(invisible(NULL))
   }
 
-  plot_data$stratum_value <- factor(
+  plot_data$facet_label <- if (length(unique(plot_data$analysis_year)) > 1L) {
+    paste(plot_data$stratification, plot_data$analysis_year, sep = " / ")
+  } else {
+    plot_data$stratification
+  }
+  plot_data$stratum_value <- stats::reorder(
     plot_data$stratum_value,
-    levels = unique(plot_data$stratum_value[order(plot_data$median)])
+    plot_data$median
   )
 
   plot <- ggplot(
@@ -151,13 +159,17 @@ plot_box_summary <- function(data, metric_label, filename) {
       ymax = maximum
     )
   ) +
-    geom_boxplot(stat = "identity", fill = "#86b6d9", color = "#1f2933") +
-    facet_wrap(~ analysis_year, scales = "free_x") +
+    geom_boxplot(stat = "identity", fill = "#86b6d9", color = "#1f2933", width = 0.5) +
     coord_flip() +
-    labs(x = NULL, y = metric_label) +
-    theme_minimal(base_size = 12)
+    facet_wrap(~ facet_label, scales = "free_y") +
+    labs(
+      title = paste(metric_label, "distribution by subgroup"),
+      x = NULL,
+      y = metric_label
+    ) +
+    theme_minimal(base_size = 10)
 
-  save_plot(plot, filename, width = 10, height = 6)
+  save_plot(plot, filename, width = 12, height = 8)
 }
 
 age_group_expr <- paste0(
@@ -294,13 +306,11 @@ cfi_histogram <- db_query(
 write_output(cfi_histogram, "4.1_cfi_histogram_bins.csv")
 plot_histogram(cfi_histogram, "CFI score", "4.1_cfi_histogram.png")
 
-for (stratum_name in names(strata)) {
-  plot_box_summary(
-    cfi_by_strata[cfi_by_strata$stratification == stratum_name, , drop = FALSE],
-    "CFI score",
-    paste0("4.1_cfi_boxplot_by_", stratum_name, ".png")
-  )
-}
+plot_box_summary(
+  cfi_by_strata,
+  "CFI score",
+  "4.1_cfi_boxplot_by_subgroup.png"
+)
 
 gagne_overall <- db_query(
   "Summarizing Gagne overall distribution.",
@@ -321,13 +331,11 @@ gagne_histogram <- db_query(
 write_output(gagne_histogram, "4.1_gagne_histogram_bins.csv")
 plot_histogram(gagne_histogram, "Gagne score", "4.1_gagne_histogram.png")
 
-for (stratum_name in names(strata)) {
-  plot_box_summary(
-    gagne_by_strata[gagne_by_strata$stratification == stratum_name, , drop = FALSE],
-    "Gagne score",
-    paste0("4.1_gagne_boxplot_by_", stratum_name, ".png")
-  )
-}
+plot_box_summary(
+  gagne_by_strata,
+  "Gagne score",
+  "4.1_gagne_boxplot_by_subgroup.png"
+)
 
 ccw_lookup_path <- file.path(config$lookup_dir, "0.6_ccw_diagnosis_lookup.csv")
 if (!file.exists(ccw_lookup_path)) {
@@ -502,11 +510,12 @@ hiv_ccw_burden <- db_query(
 )
 write_output(hiv_ccw_burden, "4.1_hiv_ccw_burden_by_strata.csv")
 
-table_one_categorical_parts <- lapply(
+table_one_category_exprs <- lapply(
   list(
     age_group = age_group_expr,
     sex = sex_expr,
     insurance_type = insurance_expr,
+    insurance_segment = insurance_segment_expr,
     race_ethnicity = race_expr,
     hiv_status = hiv_status_expr
   ),
@@ -515,64 +524,122 @@ table_one_categorical_parts <- lapply(
     category_expr
   }
 )
-table_one_categorical_parts <- Map(
-  function(variable_name, category_expr) {
-    paste0(
-      "SELECT
-         analysis_year,
-         ", frailty_expr, " AS frailty_level,
-         ", sql_string(variable_name), " AS variable,
-         ", category_expr, " AS category,
-         COUNT(*)::BIGINT AS n_person_years
-       FROM ", final_identifier, "
-       WHERE ", analysis_year_filter, "
-         AND cfi_score IS NOT NULL
-       GROUP BY analysis_year, ", frailty_expr, ", ", category_expr
-    )
-  },
-  names(table_one_categorical_parts),
-  table_one_categorical_parts
-)
-table_one_categorical <- db_query(
-  "Building categorical Table 1 by frailty level.",
-  paste0(
-    "WITH categorical AS (
-       ",
-    paste(unlist(table_one_categorical_parts), collapse = "\nUNION ALL\n"),
-    "
-     ),
-     denominators AS (
-       SELECT
-         analysis_year,
-         ", frailty_expr, " AS frailty_level,
-         COUNT(*)::BIGINT AS frailty_denominator
-       FROM ", final_identifier, "
-       WHERE ", analysis_year_filter, "
-         AND cfi_score IS NOT NULL
-       GROUP BY analysis_year, ", frailty_expr, "
-     )
-     SELECT
-       c.analysis_year,
-       c.frailty_level,
-       c.variable,
-       c.category,
-       d.frailty_denominator,
-       CASE WHEN c.n_person_years BETWEEN 1 AND ", min_count - 1L, "
-            THEN NULL ELSE c.n_person_years END AS n_person_years,
-       CASE WHEN c.n_person_years BETWEEN 1 AND ", min_count - 1L, "
-            THEN NULL ELSE c.n_person_years::DOUBLE PRECISION / d.frailty_denominator END
-            AS percent_within_frailty_level,
-       CASE WHEN c.n_person_years BETWEEN 1 AND ", min_count - 1L, "
-            THEN TRUE ELSE FALSE END AS small_cell_suppressed
-     FROM categorical c
-     INNER JOIN denominators d
-       ON c.analysis_year = d.analysis_year
-      AND c.frailty_level = d.frailty_level
-     WHERE d.frailty_denominator >= ", min_count, "
-     ORDER BY c.analysis_year, c.frailty_level, c.variable, c.category"
+
+build_categorical_table_one <- function(
+  group_expr,
+  group_column,
+  denominator_column,
+  percent_column,
+  where_sql,
+  message_label,
+  category_exprs = table_one_category_exprs
+) {
+  table_one_categorical_parts <- Map(
+    function(variable_name, category_expr) {
+      paste0(
+        "SELECT
+           analysis_year,
+           ", group_expr, " AS ", group_column, ",
+           ", sql_string(variable_name), " AS variable,
+           ", category_expr, " AS category,
+           COUNT(*)::BIGINT AS n_person_years
+         FROM ", final_identifier, "
+         WHERE ", analysis_year_filter, "
+           AND ", where_sql, "
+         GROUP BY analysis_year, ", group_expr, ", ", category_expr
+      )
+    },
+    names(category_exprs),
+    category_exprs
   )
+
+  db_query(
+    message_label,
+    paste0(
+      "WITH categorical AS (
+         ",
+      paste(unlist(table_one_categorical_parts), collapse = "\nUNION ALL\n"),
+      "
+       ),
+       denominators AS (
+         SELECT
+           analysis_year,
+           ", group_expr, " AS ", group_column, ",
+           COUNT(*)::BIGINT AS ", denominator_column, "
+         FROM ", final_identifier, "
+         WHERE ", analysis_year_filter, "
+           AND ", where_sql, "
+         GROUP BY analysis_year, ", group_expr, "
+       )
+       SELECT
+         c.analysis_year,
+         c.", group_column, ",
+         c.variable,
+         c.category,
+         d.", denominator_column, ",
+         CASE WHEN c.n_person_years BETWEEN 1 AND ", min_count - 1L, "
+              THEN NULL ELSE c.n_person_years END AS n_person_years,
+         CASE WHEN c.n_person_years BETWEEN 1 AND ", min_count - 1L, "
+              THEN NULL ELSE c.n_person_years::DOUBLE PRECISION / d.", denominator_column, " END
+              AS ", percent_column, ",
+         CASE WHEN c.n_person_years BETWEEN 1 AND ", min_count - 1L, "
+              THEN TRUE ELSE FALSE END AS small_cell_suppressed
+       FROM categorical c
+       INNER JOIN denominators d
+         ON c.analysis_year = d.analysis_year
+        AND c.", group_column, " = d.", group_column, "
+       WHERE d.", denominator_column, " >= ", min_count, "
+       ORDER BY c.analysis_year, c.", group_column, ", c.variable, c.category"
+    )
+  )
+}
+
+gagne_level_expr <- "CASE
+  WHEN gagne_score < 0 THEN 'Gagne <0'
+  WHEN gagne_score = 0 THEN 'Gagne 0'
+  WHEN gagne_score BETWEEN 1 AND 2 THEN 'Gagne 1-2'
+  WHEN gagne_score BETWEEN 3 AND 5 THEN 'Gagne 3-5'
+  ELSE 'Gagne 6+'
+END"
+
+table_one_categorical <- build_categorical_table_one(
+  group_expr = frailty_expr,
+  group_column = "frailty_level",
+  denominator_column = "frailty_denominator",
+  percent_column = "percent_within_frailty_level",
+  where_sql = "cfi_score IS NOT NULL",
+  message_label = "Building categorical Table 1 by frailty level."
 )
 write_output(table_one_categorical, "4.1_table_one_by_frailty_level_categorical.csv")
+
+table_one_gagne_categorical <- build_categorical_table_one(
+  group_expr = gagne_level_expr,
+  group_column = "gagne_level",
+  denominator_column = "gagne_denominator",
+  percent_column = "percent_within_gagne_level",
+  where_sql = "gagne_score IS NOT NULL",
+  message_label = "Building categorical Table 1 by Gagne score level."
+)
+write_output(
+  table_one_gagne_categorical,
+  "4.1_table_one_by_gagne_level_categorical.csv"
+)
+
+table_one_hiv_categorical <- build_categorical_table_one(
+  group_expr = hiv_status_expr,
+  group_column = "hiv_status_group",
+  denominator_column = "hiv_status_denominator",
+  percent_column = "percent_within_hiv_status",
+  where_sql = "hiv_status IS NOT NULL",
+  message_label = "Building categorical Table 1 by HIV status.",
+  category_exprs = table_one_category_exprs[
+    names(table_one_category_exprs) != "hiv_status"
+  ]
+)
+write_output(
+  table_one_hiv_categorical,
+  "4.1_table_one_by_hiv_status_categorical.csv"
+)
 
 table_one_continuous_parts <- list(
   age = "age",

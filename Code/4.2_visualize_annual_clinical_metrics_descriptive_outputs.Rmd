@@ -1,0 +1,587 @@
+---
+title: "Annual Clinical Metrics Descriptive Analysis"
+author: "Nemo Zhou"
+date: "2026-07-03"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+params:
+  descriptive_output_dir: null
+  analysis_year_label: null
+---
+
+<!--
+Project: Frailty_Komoto annual clinical metrics descriptive visualization
+Author: Nemo Zhou
+Date started: 2026-07-02
+Date last updated: 2026-07-03
+
+Purpose:
+This R Markdown report visualizes aggregate annual clinical metrics outputs
+created by Code/4.1_describe_annual_clinical_metrics.R. It does not connect to
+Redshift. It reads aggregate CSV files from the project-root Outputs folder,
+including visualization-input CSVs prepared by
+Code/4.3_prepare_annual_clinical_metrics_visualization_inputs.R, and renders CFI
+and Gagne histograms, box plots, stacked subgroup bar plots, Table 1 summaries,
+an HIV-status Table 1, HIV-positive subgroup prevalence, and overall CCW
+group/disease prevalence tables.
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+
+library(ggplot2)
+library(knitr)
+```
+
+```{r helpers}
+if (!is.null(params$descriptive_output_dir) && nzchar(params$descriptive_output_dir)) {
+  output_dir <- params$descriptive_output_dir
+} else {
+  output_dir_candidates <- file.path(
+    c("Outputs", "../Outputs"),
+    "4.1_annual_clinical_metrics_descriptive"
+  )
+  output_dir <- output_dir_candidates[
+    dir.exists(output_dir_candidates)
+  ][1]
+}
+
+if (is.null(output_dir) || is.na(output_dir) || !dir.exists(output_dir)) {
+  stop(
+    "Could not find the clinical metrics descriptive output directory. ",
+    "Run Code/4.1_describe_annual_clinical_metrics.R first."
+  )
+}
+
+read_required_csv <- function(file_name) {
+  path <- file.path(output_dir, file_name)
+  if (!file.exists(path)) {
+    stop(
+      "Missing required file: ",
+      path,
+      ". Run Code/4.1_describe_annual_clinical_metrics.R first."
+    )
+  }
+
+  utils::read.csv(path, stringsAsFactors = FALSE, check.names = FALSE)
+}
+
+comma_label <- function(x) {
+  format(
+    round(x),
+    big.mark = ",",
+    scientific = FALSE,
+    trim = TRUE
+  )
+}
+
+percent_label <- function(x) {
+  paste0(sprintf("%.1f", 100 * as.numeric(x)), "%")
+}
+
+count_percent_label <- function(n, proportion) {
+  n_value <- suppressWarnings(as.numeric(n))
+  proportion_value <- suppressWarnings(as.numeric(proportion))
+
+  ifelse(
+    is.na(n_value) | is.na(proportion_value),
+    NA_character_,
+    paste0(comma_label(n_value), " (", percent_label(proportion_value), ")")
+  )
+}
+
+format_n_header <- function(label, n) {
+  paste0(label, " (N=", comma_label(n), ")")
+}
+
+metric_level_palette <- c(
+  "Non-frail" = "#2E7D32",
+  "Prefrail" = "#F9A825",
+  "Frail" = "#C62828",
+  "Gagne <0" = "#6A4C93",
+  "Gagne 0" = "#2E86AB",
+  "Gagne 1-2" = "#52B788",
+  "Gagne 3-5" = "#F9C74F",
+  "Gagne 6+" = "#D62828",
+  "HIV negative" = "#3A86FF",
+  "HIV positive" = "#FF006E"
+)
+
+table_one_variable_labels <- c(
+  age_group = "Age group",
+  insurance_type = "Mx insurance group",
+  insurance_segment = "Mx insurance segment",
+  race_ethnicity = "Race/ethnicity",
+  sex = "Sex",
+  hiv_status = "HIV status"
+)
+
+table_one_variable_order <- c(
+  "Age group",
+  "Mx insurance group",
+  "Mx insurance segment",
+  "Overall",
+  "Race/ethnicity",
+  "Sex",
+  "HIV status"
+)
+
+format_table_one_display <- function(
+  data,
+  group_column,
+  denominator_column,
+  percent_column,
+  group_labels
+) {
+  data$variable <- table_one_variable_labels[data$variable]
+  data$group_label <- group_labels[data[[group_column]]]
+  data$cell <- percent_label(data[[percent_column]])
+  data <- data[
+    !is.na(data$variable) & !is.na(data$group_label),
+    ,
+    drop = FALSE
+  ]
+
+  denominators <- unique(data[
+    ,
+    c("analysis_year", "group_label", denominator_column),
+    drop = FALSE
+  ])
+  names(denominators)[names(denominators) == denominator_column] <- "denominator"
+
+  overall_rows <- denominators
+  overall_rows$variable <- "Overall"
+  overall_rows$category <- "Overall"
+  overall_rows$cell <- "100.0%"
+
+  display_data <- rbind(
+    data[, c("analysis_year", "variable", "category", "group_label", "cell")],
+    overall_rows[, c("analysis_year", "variable", "category", "group_label", "cell")]
+  )
+  names(display_data)[names(display_data) == "category"] <- "level"
+
+  output_tables <- list()
+  for (analysis_year in unique(display_data$analysis_year)) {
+    year_data <- display_data[
+      display_data$analysis_year == analysis_year,
+      ,
+      drop = FALSE
+    ]
+    year_denominators <- denominators[
+      denominators$analysis_year == analysis_year,
+      ,
+      drop = FALSE
+    ]
+
+    levels <- unique(year_data[, c("variable", "level"), drop = FALSE])
+    levels$variable_order <- match(levels$variable, table_one_variable_order)
+    levels$level_order <- seq_len(nrow(levels))
+
+    rows <- list()
+    for (row_index in seq_len(nrow(levels))) {
+      base_row <- levels[row_index, , drop = FALSE]
+      output_row <- data.frame(
+        variable = base_row$variable,
+        level = base_row$level,
+        stringsAsFactors = FALSE
+      )
+
+      for (group_label in unname(group_labels)) {
+        header <- format_n_header(
+          group_label,
+          year_denominators$denominator[
+            year_denominators$group_label == group_label
+          ][1]
+        )
+        matching_cell <- year_data$cell[
+          year_data$variable == base_row$variable &
+            year_data$level == base_row$level &
+            year_data$group_label == group_label
+        ]
+        output_row[[header]] <- if (length(matching_cell) == 0L) {
+          NA_character_
+        } else {
+          matching_cell[[1]]
+        }
+      }
+
+      rows[[length(rows) + 1L]] <- output_row
+    }
+
+    table <- do.call(rbind, rows)
+    table$variable_order <- match(table$variable, table_one_variable_order)
+    table$level_order <- seq_len(nrow(table))
+    table <- table[
+      order(table$variable_order, table$level_order),
+      setdiff(names(table), c("variable_order", "level_order")),
+      drop = FALSE
+    ]
+    output_tables[[as.character(analysis_year)]] <- table
+  }
+
+  output_tables
+}
+
+print_table_one <- function(tables) {
+  for (analysis_year in names(tables)) {
+    if (length(tables) > 1L) {
+      cat("\n\n### ", analysis_year, "\n\n", sep = "")
+    }
+    cat(knitr::kable(tables[[analysis_year]], row.names = FALSE), sep = "\n")
+    cat("\n\n")
+  }
+}
+
+format_prevalence_table <- function(data, label_columns, count_column) {
+  sort_columns <- intersect(c("ccw_group", "ccw_condition_name"), names(data))
+  if (length(sort_columns) > 0L) {
+    data <- data[
+      do.call(order, data[sort_columns]),
+      ,
+      drop = FALSE
+    ]
+  }
+
+  denominator <- unique(data$denominator_person_years)
+  if (length(denominator) != 1L) {
+    denominator <- denominator[[1]]
+  }
+
+  output <- data[, label_columns, drop = FALSE]
+  output[[format_n_header("Overall prevalence", denominator)]] <-
+    count_percent_label(data[[count_column]], data$prevalence)
+  output
+}
+
+format_hiv_positive_prevalence_table <- function(data) {
+  data <- data[data$metric_level == "HIV positive", , drop = FALSE]
+  data$n_person_years <- as.numeric(data$n_person_years)
+  data$subgroup_denominator <- as.numeric(data$subgroup_denominator)
+  data$percent_within_subgroup <- as.numeric(data$percent_within_subgroup)
+  data$stratification <- unname(table_one_variable_labels[data$stratification])
+  data <- data[!is.na(data$stratification), , drop = FALSE]
+
+  data$stratification <- factor(data$stratification, levels = table_one_variable_order)
+  data <- data[
+    order(data$analysis_year, data$stratification, data$stratum_value),
+    ,
+    drop = FALSE
+  ]
+
+  output <- data.frame(
+    Subgroup = as.character(data$stratification),
+    Level = data$stratum_value,
+    check.names = FALSE
+  )
+  output[["HIV positive prevalence"]] <- count_percent_label(
+    data$n_person_years,
+    data$percent_within_subgroup
+  )
+  output
+}
+
+plot_histogram <- function(data, metric_label, bin_width) {
+  data$bin_start <- as.numeric(data$bin_start)
+  data$n_person_years <- as.numeric(data$n_person_years)
+
+  ggplot(data, aes(x = bin_start, y = n_person_years)) +
+    geom_col(width = bin_width, fill = "#3F7C85", color = "white", linewidth = 0.1) +
+    facet_wrap(~ analysis_year, scales = "free_y") +
+    scale_y_continuous(labels = comma_label) +
+    labs(
+      title = paste("Distribution of", metric_label),
+      x = metric_label,
+      y = "Person-years"
+    ) +
+    theme_minimal(base_size = 12)
+}
+
+plot_box_by_subgroup <- function(data, metric_label) {
+  numeric_columns <- c("minimum", "p25", "median", "p75", "maximum", "n_person_years")
+  data[numeric_columns] <- lapply(data[numeric_columns], as.numeric)
+  data <- data[!is.na(data$n_person_years) & data$n_person_years >= 11, , drop = FALSE]
+  data$facet_label <- if (length(unique(data$analysis_year)) > 1L) {
+    paste(data$stratification, data$analysis_year, sep = " / ")
+  } else {
+    data$stratification
+  }
+  data$stratum_value <- stats::reorder(data$stratum_value, data$median)
+
+  ggplot(
+    data,
+    aes(
+      x = stratum_value,
+      ymin = minimum,
+      lower = p25,
+      middle = median,
+      upper = p75,
+      ymax = maximum
+    )
+  ) +
+    geom_boxplot(stat = "identity", fill = "#A44A3F", width = 0.5) +
+    coord_flip() +
+    facet_wrap(~ facet_label, scales = "free_y") +
+    labs(
+      title = paste(metric_label, "distribution by subgroup"),
+      x = NULL,
+      y = metric_label
+    ) +
+    theme_minimal(base_size = 10)
+}
+
+single_stacked_level_distribution_plot <- function(
+  data,
+  metric_label,
+  level_order,
+  stratification_label
+) {
+  data$percent_within_subgroup <- as.numeric(data$percent_within_subgroup)
+  data$n_person_years <- as.numeric(data$n_person_years)
+  data$subgroup_denominator <- as.numeric(data$subgroup_denominator)
+  data <- data[
+    !is.na(data$percent_within_subgroup) &
+      !is.na(data$subgroup_denominator) &
+      data$subgroup_denominator >= 11,
+    ,
+    drop = FALSE
+  ]
+
+  data$metric_level <- factor(data$metric_level, levels = level_order)
+  data$stratification <- table_one_variable_labels[data$stratification]
+  data <- data[!is.na(data$stratification), , drop = FALSE]
+  data <- data[data$stratification == stratification_label, , drop = FALSE]
+  if (nrow(data) == 0L) {
+    return(NULL)
+  }
+
+  data$plot_label <- ""
+  data$plot_label[data$percent_within_subgroup >= 0.05] <- sprintf(
+    "%.0f",
+    100 * data$percent_within_subgroup[data$percent_within_subgroup >= 0.05]
+  )
+  near_complete <- data$percent_within_subgroup >= 0.95 &
+    data$percent_within_subgroup < 1
+  data$plot_label[near_complete] <- sprintf(
+    "%.1f",
+    100 * data$percent_within_subgroup[near_complete]
+  )
+  data$plot_label[data$percent_within_subgroup == 1] <- "100"
+  data$stratum_value <- factor(data$stratum_value, levels = unique(data$stratum_value))
+
+  ggplot(
+    data,
+    aes(
+      x = stratum_value,
+      y = n_person_years,
+      fill = metric_level
+    )
+  ) +
+    geom_col(width = 0.5, color = "white", linewidth = 0.15, position = "fill") +
+    geom_text(
+      aes(label = plot_label),
+      position = position_fill(vjust = 0.5),
+      color = "white",
+      size = 2.8
+    ) +
+    scale_y_continuous(
+      labels = function(x) paste0(round(100 * x), "%"),
+      expand = c(0, 0)
+    ) +
+    coord_cartesian(ylim = c(0, 1), clip = "off") +
+    scale_fill_manual(
+      values = metric_level_palette,
+      breaks = level_order,
+      drop = FALSE
+    ) +
+    labs(
+      title = paste(metric_label, "level distribution by", stratification_label),
+      x = NULL,
+      y = "Proportion",
+      fill = NULL
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid.major.x = element_blank(),
+      legend.position = "right"
+    )
+}
+
+print_stacked_level_distribution_plots <- function(data, metric_label, level_order) {
+  stratification_order <- table_one_variable_order[
+    table_one_variable_order != "Overall"
+  ]
+  available_strata <- table_one_variable_labels[unique(data$stratification)]
+  stratification_order <- stratification_order[
+    stratification_order %in% available_strata
+  ]
+
+  for (stratification_label in stratification_order) {
+    print(single_stacked_level_distribution_plot(
+      data,
+      metric_label,
+      level_order,
+      stratification_label
+    ))
+  }
+}
+```
+
+```{r read-data}
+cfi_histogram <- read_required_csv("4.1_cfi_histogram_bins.csv")
+cfi_boxplot <- read_required_csv("4.1_cfi_distribution_by_strata.csv")
+cfi_table_one <- read_required_csv("4.1_table_one_by_frailty_level_categorical.csv")
+cfi_level_distribution <- read_required_csv("4.3_cfi_level_distribution_by_subgroup.csv")
+
+gagne_histogram <- read_required_csv("4.1_gagne_histogram_bins.csv")
+gagne_boxplot <- read_required_csv("4.1_gagne_distribution_by_strata.csv")
+gagne_table_one <- read_required_csv("4.1_table_one_by_gagne_level_categorical.csv")
+gagne_level_distribution <- read_required_csv("4.3_gagne_level_distribution_by_subgroup.csv")
+
+hiv_table_one <- read_required_csv("4.1_table_one_by_hiv_status_categorical.csv")
+hiv_status_distribution <- read_required_csv("4.3_hiv_status_distribution_by_subgroup.csv")
+
+ccw_group_prevalence <- read_required_csv("4.1_ccw_group_prevalence.csv")
+ccw_condition_prevalence <- read_required_csv("4.1_ccw_condition_prevalence.csv")
+```
+
+# CFI
+
+## Histogram
+
+```{r cfi-histogram}
+plot_histogram(cfi_histogram, "CFI score", bin_width = 0.01)
+```
+
+## Box Plots
+
+```{r cfi-boxplots}
+plot_box_by_subgroup(cfi_boxplot, "CFI score")
+```
+
+## Level Distribution By Subgroup
+
+```{r cfi-level-distribution, fig.show='hold', out.width='49%', fig.width=5.8, fig.height=4.2}
+print_stacked_level_distribution_plots(
+  cfi_level_distribution,
+  "CFI",
+  level_order = c("Non-frail", "Prefrail", "Frail")
+)
+```
+
+## Table 1
+
+```{r cfi-table-one, results='asis'}
+print_table_one(format_table_one_display(
+  cfi_table_one,
+  group_column = "frailty_level",
+  denominator_column = "frailty_denominator",
+  percent_column = "percent_within_frailty_level",
+  group_labels = c(
+    "Robust (<0.15)" = "Non-frail",
+    "Prefrail (0.15-<0.25)" = "Prefrail",
+    "Frail (>=0.25)" = "Frail"
+  )
+))
+```
+
+# Gagne
+
+## Histogram
+
+```{r gagne-histogram}
+plot_histogram(gagne_histogram, "Gagne score", bin_width = 1)
+```
+
+## Box Plots
+
+```{r gagne-boxplots}
+plot_box_by_subgroup(gagne_boxplot, "Gagne score")
+```
+
+## Level Distribution By Subgroup
+
+```{r gagne-level-distribution, fig.show='hold', out.width='49%', fig.width=5.8, fig.height=4.2}
+print_stacked_level_distribution_plots(
+  gagne_level_distribution,
+  "Gagne",
+  level_order = c("Gagne <0", "Gagne 0", "Gagne 1-2", "Gagne 3-5", "Gagne 6+")
+)
+```
+
+## Table 1
+
+```{r gagne-table-one, results='asis'}
+print_table_one(format_table_one_display(
+  gagne_table_one,
+  group_column = "gagne_level",
+  denominator_column = "gagne_denominator",
+  percent_column = "percent_within_gagne_level",
+  group_labels = c(
+    "Gagne <0" = "Gagne <0",
+    "Gagne 0" = "Gagne 0",
+    "Gagne 1-2" = "Gagne 1-2",
+    "Gagne 3-5" = "Gagne 3-5",
+    "Gagne 6+" = "Gagne 6+"
+  )
+))
+```
+
+# HIV Status
+
+## HIV Positive Prevalence
+
+```{r hiv-status-distribution, results='asis'}
+cat(knitr::kable(
+  format_hiv_positive_prevalence_table(hiv_status_distribution),
+  row.names = FALSE
+), sep = "\n")
+```
+
+## Table 1
+
+```{r hiv-table-one, results='asis'}
+print_table_one(format_table_one_display(
+  hiv_table_one,
+  group_column = "hiv_status_group",
+  denominator_column = "hiv_status_denominator",
+  percent_column = "percent_within_hiv_status",
+  group_labels = c(
+    "HIV negative" = "HIV negative",
+    "HIV positive" = "HIV positive"
+  )
+))
+```
+
+# CCW Prevalence
+
+## Group Prevalence
+
+```{r ccw-group-prevalence, results='asis'}
+ccw_group_display <- format_prevalence_table(
+  ccw_group_prevalence,
+  label_columns = "ccw_group",
+  count_column = "n_with_group"
+)
+cat(knitr::kable(ccw_group_display, row.names = FALSE), sep = "\n")
+```
+
+## Disease Prevalence
+
+```{r ccw-disease-prevalence, results='asis'}
+ccw_condition_display <- format_prevalence_table(
+  ccw_condition_prevalence,
+  label_columns = c("ccw_group", "ccw_condition_name"),
+  count_column = "n_with_condition"
+)
+cat(knitr::kable(ccw_condition_display, row.names = FALSE), sep = "\n")
+```

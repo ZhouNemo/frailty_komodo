@@ -3,12 +3,13 @@
 Project: Frailty_Komoto
 Author: Nemo Zhou
 Date started: 2026-06-16
-Date last updated: 2026-07-02
+Date last updated: 2026-07-04
 
-This folder contains the R scripts used to connect to Komodo, diagnose source
-tables, build annual eligibility cohorts, generate aggregate summaries, and run
-the normalized annual clinical-metrics pipeline. Scripts should be run in
-numeric order unless a task-specific note says otherwise.
+This folder contains the R and helper scripts used to connect to Komodo,
+diagnose source tables, build annual eligibility cohorts, generate aggregate
+summaries, run the normalized annual clinical-metrics pipeline, and run the
+annual polypharmacy pipeline. Scripts should be run in numeric order unless a
+task-specific note says otherwise.
 
 The previous CFI and raw-event clinical-metrics processing scripts are archived
 in `Code/Old/`. The active clinical-metrics pathway now follows
@@ -29,8 +30,10 @@ candidate event prefilters, or apply the older first-25-array-elements cap.
 - `2.xx`: aggregate Table 1 and subgroup summary scripts.
 - `3.xx`: active normalized annual clinical-metrics build pipeline.
 - `4.xx`: descriptive analyses using completed annual analysis tables.
-- `Code/Old`: archived legacy CFI, raw-event shared metric, and prior optimized
-  raw-event scripts retained for provenance or scoring-engine reuse.
+- `5.xx`: active annual polypharmacy build pipeline.
+- `Code/Old`: historical scripts that are no longer part of the active workflow,
+  retained for provenance or scoring-engine reuse. `Documents/Old` and
+  `Outputs/Old` follow the same convention for historical documents and outputs.
 
 ## `0.1_connect to Komodo.R`
 
@@ -395,21 +398,232 @@ Outputs/4.1_annual_clinical_metrics_descriptive
 
 The script produces CFI and Gagne overall summaries, histograms, and
 aggregate-statistic box plots by age group, sex, primary medical insurance,
-medical insurance segment, and race/ethnicity. It also produces CCW condition
-and group prevalence tables, CCW burden by age/sex/payer/race, HIV-stratified
-CCW burden by age/sex/payer, and categorical/continuous Table 1 summaries by
-CFI frailty level. Small cells below 11 are suppressed in exported aggregate
-tables.
+medical insurance segment, and race/ethnicity, with one combined subgroup
+box-plot figure per metric. It also produces CCW condition and group prevalence
+tables, CCW burden by age/sex/payer/race, HIV-stratified CCW burden by
+age/sex/payer, and categorical/continuous Table 1 summaries by CFI frailty
+level. It also writes long categorical Table 1 source files by CFI frailty
+level, Gagne score level, and HIV status for the R Markdown report to format
+with group denominators in headers and percentages in cells. Gagne Table 1
+columns use the bands `Gagne <0`, `Gagne 0`, `Gagne 1-2`, `Gagne 3-5`, and
+`Gagne 6+`. Small cells below 11 are suppressed in exported aggregate tables.
 
 Run this after `3.11_build_normalized_annual_clinical_metrics.R` and
 `3.12_check_normalized_annual_clinical_metrics.R` have completed successfully.
 
+## `4.2_visualize_annual_clinical_metrics_descriptive_outputs.Rmd`
+
+CSV-only R Markdown report for the normalized annual clinical metrics
+descriptive outputs. It reads files from
+`Outputs/4.1_annual_clinical_metrics_descriptive` and does not reconnect to
+Redshift. The report is intentionally lean: for CFI and Gagne it presents the
+histogram, subgroup box plots, stacked metric-level subgroup bar plots, and
+Table 1 in that order; it also presents an HIV-status Table 1, HIV-status
+stacked subgroup bar plots, and overall CCW group/disease prevalence tables.
+Table 1 headers include the total N for each metric level, and Table 1 cells
+show only percentages. CCW prevalence cells show count and percentage.
+
+Run this after `4.3_prepare_annual_clinical_metrics_visualization_inputs.R`
+has generated the visualization-input CSV files.
+
+## `4.3_prepare_annual_clinical_metrics_visualization_inputs.R`
+
+CSV-only preparation script for plots used by
+`4.2_visualize_annual_clinical_metrics_descriptive_outputs.Rmd`. It reads the
+existing aggregate categorical Table 1 CSV files from
+`Outputs/4.1_annual_clinical_metrics_descriptive` and writes within-subgroup
+metric-level distribution CSVs for stacked percentage bar plots:
+
+```text
+4.3_cfi_level_distribution_by_subgroup.csv
+4.3_gagne_level_distribution_by_subgroup.csv
+4.3_hiv_status_distribution_by_subgroup.csv
+```
+
+It does not connect to Redshift and does not rerun `4.1`.
+
+Run this after `4.1_describe_annual_clinical_metrics.R` has generated the
+categorical Table 1 CSV files, and before knitting `4.2`.
+
+## `4.4_run_annual_clinical_metrics_descriptive_analysis.R`
+
+Year-specific wrapper for the completed normalized annual clinical metrics
+descriptive workflow. It sets `analysis_years` and `id_years` for one selected
+year, writes aggregate `4.1` and `4.3` outputs to a year-specific folder such
+as:
+
+```text
+Outputs/4.1_annual_clinical_metrics_descriptive_2025
+```
+
+By default it also renders
+`Code/4.2_visualize_annual_clinical_metrics_descriptive_outputs.Rmd` to a
+year-specific HTML file in that same folder, so a 2025 run does not overwrite
+2016 descriptive outputs. Edit `analysis_year <- 2025L` at the top of the file
+or pass a year as the first command-line argument.
+
+## `5.0_annual_polypharmacy_helpers.R`
+
+Shared helper file for the active `5.x` annual polypharmacy pipeline. It sources
+the existing normalized clinical-metrics helper utilities, then defines
+polypharmacy-specific configuration, pharmacy fill-window helpers, transaction
+filter helpers, NDC11 export paths, and n2c/RxNav mapping metadata. It does not
+create Redshift tables when sourced by itself.
+
+The main override option is:
+
+```r
+options("frailty.annual_polypharmacy.config" = list(...))
+```
+
+The default configuration processes 2016 only, reuses `2_annual_metric_ids` as
+the patient-year denominator, does not apply `PATIENT_CLOSED` or `RX CLOSED`
+coverage filters, and expects a reviewed transaction-status decision before
+`5.1` extracts pharmacy fills. Configure one or more of
+`transaction_result_keep`, `transaction_status_keep`, or
+`transaction_source_type_keep` after reviewing aggregate transaction values.
+For an exploratory unfiltered run only, set
+`allow_unfiltered_transactions = TRUE`. The reviewed NDC11-to-ATC crosswalk CSV
+is expected at:
+
+```text
+Outputs/5.3_polypharmacy_ndc11_atc_crosswalk.csv
+```
+
+## `5.1_prepare_polypharmacy_pharmacy_fills.R`
+
+Builds cleaned selected-year pharmacy fills from `komodo_ext.pharmacy_events`
+after joining to `2_annual_metric_ids` by `patient_id`. It validates the
+confirmed pharmacy schema fields, keeps character 11-digit NDC11 values,
+requires positive days supply, and applies reviewed transaction filters from
+the `frailty.annual_polypharmacy.config` option. It stops unless a reviewed
+filter is configured or `allow_unfiltered_transactions = TRUE` is set for an
+exploratory run. It writes durable pre/post extraction QA for excluded fills,
+days-supply buckets, and transaction values. It writes:
+
+```text
+2_polypharmacy_pharmacy_fills
+2_polypharmacy_fill_extraction_qa
+```
+
+Run this after `3.1_prepare_annual_metric_ids.R`.
+
+## `5.2_export_polypharmacy_unique_ndc11.R`
+
+Builds the selected-year unique NDC11 table from cleaned pharmacy fills and
+exports one NDC11 per line for n2c/RxNav mapping. The local export contains drug
+codes only, not patient-level rows. It writes:
+
+```text
+2_polypharmacy_unique_ndc11
+Outputs/5.2_polypharmacy_unique_ndc11_<years>.txt
+```
+
+Run this after `5.1_prepare_polypharmacy_pharmacy_fills.R`, then map the text
+file with n2c before staging the crosswalk.
+
+## `5.25_download_and_run_polypharmacy_n2c_mapping.ps1`
+
+PowerShell helper for the one-time external n2c/RxNav mapping step between
+`5.2` and `5.3`. It downloads n2c into the project root if needed, creates a
+project-local Python virtual environment under `n2c/.venv`, installs n2c's
+Python dependencies, runs ATC4 mapping on the exported unique NDC11 text file,
+and copies the completed n2c CSV to:
+
+```text
+Outputs/5.3_polypharmacy_ndc11_atc_crosswalk.csv
+```
+
+This script only needs to be run once per exported unique-NDC list and mapping
+version. If the crosswalk CSV already exists, the script exits without rerunning
+the multi-hour RxNav mapping unless `-Force` is supplied. Reuse the staged
+crosswalk for later `5.3` through `5.6` reruns unless the NDC input or mapping
+version intentionally changes.
+
+Run this after `5.2_export_polypharmacy_unique_ndc11.R` and before
+`5.3_stage_polypharmacy_ndc11_atc_crosswalk.R`.
+
+## `5.3_stage_polypharmacy_ndc11_atc_crosswalk.R`
+
+Stages a versioned NDC11-to-ATC4/ATC3 crosswalk from an n2c/RxNav output CSV or
+reviewed crosswalk CSV with an NDC column and an ATC4, ATC3, or generic ATC
+code column. The script expands multiple ATC codes packed into one input cell,
+keeps unmapped selected-year NDC11 values as `mapping_status = 'unmapped'` for
+coverage QA, converts ATC4 inputs to ATC3, and retains ATC3 inputs as ATC3-level
+mappings instead of mislabeled ATC4. It writes:
+
+```text
+2_polypharmacy_ndc11_atc_crosswalk
+```
+
+Run this after saving the crosswalk CSV to the configured
+`crosswalk_input_path`.
+
+## `5.4_build_annual_polypharmacy_exposures.R`
+
+Joins cleaned pharmacy fills to the staged NDC11-to-ATC crosswalk and builds
+calendar-year-clipped ATC3 exposure episodes using
+`fill_date + days_supply - 1`. One fill can produce multiple exposure rows when
+an NDC maps to multiple ATC classes. It writes:
+
+```text
+2_annual_polypharmacy_exposure_episodes
+```
+
+Run this after `5.3_stage_polypharmacy_ndc11_atc_crosswalk.R`.
+
+## `5.5_calculate_annual_polypharmacy_metrics.R`
+
+Expands clipped ATC3 exposure episodes to patient-day active class counts using
+a day-offset table sized from the selected `2_annual_metric_ids` analysis
+windows, deduplicates multiple drugs in the same ATC3 class on the same day,
+and flags polypharmacy when at least 5 ATC3 classes are active on at least
+90 days in the patient-year. It left joins results back to every selected row
+in `2_annual_metric_ids` and writes:
+
+```text
+6_annual_polypharmacy_metrics
+```
+
+Run this after `5.4_build_annual_polypharmacy_exposures.R`.
+
+## `5.6_check_annual_polypharmacy_metrics.R`
+
+Aggregate QA script for the annual polypharmacy pipeline. It checks source
+schema fields, selected-year denominator and fill counts, durable extraction QA
+from `2_polypharmacy_fill_extraction_qa`, transaction-value counts before and
+after filtering, days-supply buckets before and after exclusions, NDC mapping
+coverage by unique NDC11 and fill row, multiple ATC4/ATC3 mappings,
+exposure-episode validity, final-table completeness, duplicate keys, and
+prescription-insurance prevalence summaries. Counts below 11 in the insurance
+prevalence section are suppressed before CSV export. It writes:
+
+```text
+Outputs/5.6_annual_polypharmacy_metrics_qa.csv
+```
+
+Run this after `5.5_calculate_annual_polypharmacy_metrics.R`.
+
+## `5.7_run_annual_polypharmacy.R`
+
+Run-all wrapper for the `5.x` annual polypharmacy flow. It sources `5.1`,
+`5.2`, `5.3`, `5.4`, `5.5`, and `5.6` in order. The default configuration is
+2016 only. The runner sets the reviewed transaction filter
+`transaction_result_keep = c("PAID")` and a date-stamped
+`mapping_version_date` in `frailty.annual_polypharmacy.config` before sourcing
+the stages (restoring any prior option value on exit), so the pipeline runs end
+to end without stopping at `5.1`. The `PAID`-only decision and its supporting
+2016 transaction-value counts are documented in
+`Documents/12_POLYPHARMACY_DATA_PROCESSING_FLOW.md`.
+
+Use this after reviewing the configured years. The runner will stop at `5.3`
+with a clear message if the n2c/RxNav crosswalk CSV has not yet been saved.
+
 ## `Code/Old`
 
-Archived scripts from the previous CFI and raw-event clinical-metrics
+Historical scripts from the previous CFI and raw-event clinical-metrics
 workflows, including the old raw-event prefilter and optimized smoke-test
-diagnostics. These files are kept for provenance and, where explicitly sourced
-by the active normalized wrappers, for reuse of already-validated scoring SQL.
-They should not be run as the active production extraction flow unless the
-project intentionally reverts to the older raw-event design.
-
+diagnostics. These files are no longer part of the active workflow. They are
+kept for provenance and, where explicitly sourced by the active normalized
+wrappers, for reuse of already-validated scoring SQL. `Documents/Old` and
+`Outputs/Old` follow the same convention for historical documents and outputs.
