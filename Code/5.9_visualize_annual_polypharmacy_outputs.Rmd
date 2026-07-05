@@ -1,0 +1,414 @@
+---
+title: "Annual Polypharmacy Descriptive Analysis"
+author: "Nemo Zhou"
+date: "2026-07-05"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+params:
+  polypharmacy_output_dir: null
+---
+
+<!--
+Project: Frailty_Komoto annual polypharmacy descriptive visualization
+Author: Nemo Zhou
+Date started: 2026-07-04
+Date last updated: 2026-07-05
+
+Purpose:
+This R Markdown report visualizes aggregate annual polypharmacy outputs created
+by Code/5.6_check_annual_polypharmacy_metrics.R and
+Code/5.8_describe_annual_polypharmacy_atc3_prevalence.R. It does not connect to
+Redshift. It reads aggregate CSV files from the project-root Outputs folder and
+renders annual polypharmacy summaries, a Table 1 by polypharmacy status,
+prescription-insurance prevalence, and selected ATC3 class prevalence.
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+
+library(ggplot2)
+library(knitr)
+```
+
+```{r helpers}
+if (!is.null(params$polypharmacy_output_dir) && nzchar(params$polypharmacy_output_dir)) {
+  output_dir <- params$polypharmacy_output_dir
+} else {
+  output_dir_candidates <- c("Outputs", "../Outputs")
+  output_dir <- output_dir_candidates[dir.exists(output_dir_candidates)][1]
+}
+
+if (is.null(output_dir) || is.na(output_dir) || !dir.exists(output_dir)) {
+  stop(
+    "Could not find the polypharmacy output directory. Run Code/5.6 and ",
+    "Code/5.8 first."
+  )
+}
+
+read_required_csv <- function(file_name) {
+  path <- file.path(output_dir, file_name)
+  if (!file.exists(path)) {
+    stop("Missing required file: ", path, ". Run Code/5.6 and Code/5.8 first.")
+  }
+
+  utils::read.csv(path, stringsAsFactors = FALSE, check.names = FALSE)
+}
+
+comma_label <- function(x) {
+  format(round(as.numeric(x)), big.mark = ",", scientific = FALSE, trim = TRUE)
+}
+
+percent_label <- function(x) {
+  value <- suppressWarnings(as.numeric(x))
+  ifelse(is.na(value), NA_character_, paste0(sprintf("%.1f", 100 * value), "%"))
+}
+
+percent_label_from_pct <- function(x) {
+  value <- suppressWarnings(as.numeric(x))
+  ifelse(is.na(value), NA_character_, paste0(sprintf("%.1f", value), "%"))
+}
+
+format_n_header <- function(label, n) {
+  paste0(label, " (N=", comma_label(n), ")")
+}
+
+table_one_variable_labels <- c(
+  age_group = "Age group",
+  sex = "Sex",
+  race_ethnicity = "Race/ethnicity",
+  mx_insurance_group = "Mx insurance group",
+  mx_insurance_segment = "Mx insurance segment",
+  rx_insurance_group = "Rx insurance group",
+  rx_insurance_segment = "Rx insurance segment"
+)
+
+table_one_variable_order <- c(
+  "Age group",
+  "Sex",
+  "Race/ethnicity",
+  "Mx insurance group",
+  "Mx insurance segment",
+  "Rx insurance group",
+  "Rx insurance segment",
+  "Overall"
+)
+
+format_table_one_display <- function(
+  data,
+  group_column,
+  denominator_column,
+  percent_column,
+  group_labels
+) {
+  data$variable <- table_one_variable_labels[data$variable]
+  data$group_label <- group_labels[data[[group_column]]]
+  data$cell <- percent_label(data[[percent_column]])
+  data <- data[
+    !is.na(data$variable) & !is.na(data$group_label),
+    ,
+    drop = FALSE
+  ]
+
+  denominators <- unique(data[
+    ,
+    c("analysis_year", "group_label", denominator_column),
+    drop = FALSE
+  ])
+  names(denominators)[names(denominators) == denominator_column] <- "denominator"
+
+  overall_rows <- denominators
+  overall_rows$variable <- "Overall"
+  overall_rows$category <- "Overall"
+  overall_rows$cell <- "100.0%"
+
+  display_data <- rbind(
+    data[, c("analysis_year", "variable", "category", "group_label", "cell")],
+    overall_rows[, c("analysis_year", "variable", "category", "group_label", "cell")]
+  )
+  names(display_data)[names(display_data) == "category"] <- "level"
+
+  output_tables <- list()
+  for (analysis_year in unique(display_data$analysis_year)) {
+    year_data <- display_data[
+      display_data$analysis_year == analysis_year,
+      ,
+      drop = FALSE
+    ]
+    year_denominators <- denominators[
+      denominators$analysis_year == analysis_year,
+      ,
+      drop = FALSE
+    ]
+
+    levels <- unique(year_data[, c("variable", "level"), drop = FALSE])
+    levels$variable_order <- match(levels$variable, table_one_variable_order)
+    levels$level_order <- seq_len(nrow(levels))
+
+    rows <- list()
+    for (row_index in seq_len(nrow(levels))) {
+      base_row <- levels[row_index, , drop = FALSE]
+      output_row <- data.frame(
+        variable = base_row$variable,
+        level = base_row$level,
+        stringsAsFactors = FALSE
+      )
+
+      for (group_label in unname(group_labels)) {
+        header <- format_n_header(
+          group_label,
+          year_denominators$denominator[
+            year_denominators$group_label == group_label
+          ][1]
+        )
+        matching_cell <- year_data$cell[
+          year_data$variable == base_row$variable &
+            year_data$level == base_row$level &
+            year_data$group_label == group_label
+        ]
+        output_row[[header]] <- if (length(matching_cell) == 0L) {
+          NA_character_
+        } else {
+          matching_cell[[1]]
+        }
+      }
+
+      rows[[length(rows) + 1L]] <- output_row
+    }
+
+    table <- do.call(rbind, rows)
+    table$variable_order <- match(table$variable, table_one_variable_order)
+    table$level_order <- seq_len(nrow(table))
+    table <- table[
+      order(table$variable_order, table$level_order),
+      setdiff(names(table), c("variable_order", "level_order")),
+      drop = FALSE
+    ]
+    output_tables[[as.character(analysis_year)]] <- table
+  }
+
+  output_tables
+}
+
+print_table_one <- function(tables) {
+  for (analysis_year in names(tables)) {
+    if (length(tables) > 1L) {
+      cat("\n\n### ", analysis_year, "\n\n", sep = "")
+    }
+    cat(knitr::kable(tables[[analysis_year]], row.names = FALSE), sep = "\n")
+    cat("\n\n")
+  }
+}
+
+plot_insurance_prevalence <- function(data) {
+  data$prevalence_pct <- as.numeric(data$prevalence_pct)
+  data$n_patient_years <- as.numeric(data$n_patient_years)
+  data <- data[
+    !is.na(data$prevalence_pct) & !is.na(data$n_patient_years),
+    ,
+    drop = FALSE
+  ]
+  data$insurance_label <- paste(
+    data$rx_insurance_group,
+    data$rx_insurance_segment,
+    sep = " / "
+  )
+  data$insurance_label <- stats::reorder(data$insurance_label, data$prevalence_pct)
+
+  ggplot(data, aes(x = insurance_label, y = prevalence_pct)) +
+    geom_col(fill = "#3F7C85", width = 0.6) +
+    coord_flip() +
+    facet_wrap(~ analysis_year, scales = "free_y") +
+    scale_y_continuous(labels = function(x) paste0(x, "%")) +
+    labs(
+      title = "Polypharmacy prevalence by prescription insurance",
+      x = NULL,
+      y = "Prevalence"
+    ) +
+    theme_minimal(base_size = 12)
+}
+
+plot_distinct_atc3_distribution <- function(data) {
+  data$n_distinct_atc3 <- as.numeric(data$n_distinct_atc3)
+  data$n_patients <- as.numeric(data$n_patients)
+  data <- data[
+    !is.na(data$n_distinct_atc3) & !is.na(data$n_patients),
+    ,
+    drop = FALSE
+  ]
+
+  ggplot(data, aes(x = n_distinct_atc3, y = n_patients)) +
+    geom_col(fill = "#6A4C93", width = 0.85) +
+    facet_wrap(~ analysis_year, scales = "free_y") +
+    scale_y_continuous(labels = function(x) comma_label(x)) +
+    scale_x_continuous(breaks = pretty) +
+    labs(
+      title = "Distinct ATC3 medication classes per patient",
+      x = "Number of distinct ATC3 classes",
+      y = "Patients"
+    ) +
+    theme_minimal(base_size = 12)
+}
+
+plot_atc3_prevalence <- function(data) {
+  data$prevalence_pct <- as.numeric(data$prevalence_pct)
+  data$n_patient_years_with_atc3 <- as.numeric(data$n_patient_years_with_atc3)
+  if (!"atc3_rank" %in% names(data)) {
+    data$atc3_rank <- NA_integer_
+  }
+  data <- data[
+    !is.na(data$prevalence_pct) & !is.na(data$n_patient_years_with_atc3),
+    ,
+    drop = FALSE
+  ]
+  data <- data[
+    order(data$analysis_year, data$atc3_rank, -data$n_patient_years_with_atc3),
+    ,
+    drop = FALSE
+  ]
+  data$atc3_plot_label <- paste0(data$atc3, " - ", data$atc3_label)
+  data$atc3_plot_label <- factor(
+    data$atc3_plot_label,
+    levels = rev(unique(data$atc3_plot_label))
+  )
+
+  ggplot(data, aes(x = atc3_plot_label, y = prevalence_pct)) +
+    geom_col(fill = "#A44A3F", width = 0.65) +
+    coord_flip() +
+    facet_wrap(~ analysis_year, scales = "free_y") +
+    scale_y_continuous(labels = function(x) paste0(x, "%")) +
+    labs(
+      title = "Top 20 ATC3 classes by prevalence",
+      x = NULL,
+      y = "Prevalence"
+    ) +
+    theme_minimal(base_size = 12)
+}
+
+key_atc3_labels <- c(
+  A01A = "Stomatological preparations",
+  A02B = "Acid-related disorder drugs",
+  A07E = "Intestinal antiinflammatory agents",
+  A10B = "Blood-glucose-lowering drugs excluding insulin",
+  B01A = "Antithrombotic agents",
+  C05A = "Agents for treatment of hemorrhoids and anal fissures for topical use",
+  C07A = "Beta-blocking agents",
+  C09A = "ACE inhibitors, plain",
+  C09C = "Angiotensin II receptor blockers, plain",
+  C10A = "Lipid-modifying agents, plain",
+  D01A = "Antifungals for topical use",
+  D02A = "Emollients and protectives",
+  D04A = "Antipruritics, including antihistamines and anesthetics",
+  D06A = "Antibiotics for topical use",
+  D07A = "Corticosteroids, plain",
+  H02A = "Corticosteroids for systemic use, plain",
+  J01C = "Beta-lactam antibacterials, penicillins",
+  J01D = "Other beta-lactam antibacterials",
+  J01F = "Macrolides, lincosamides and streptogramins",
+  J01M = "Quinolone antibacterials",
+  M01A = "Anti-inflammatory and antirheumatic products, non-steroids",
+  M03B = "Muscle relaxants, centrally acting agents",
+  N02A = "Opioids",
+  N02B = "Other analgesics and antipyretics",
+  N03A = "Antiepileptics",
+  N05A = "Antipsychotics",
+  N05B = "Anxiolytics",
+  N05C = "Hypnotics and sedatives",
+  N06A = "Antidepressants",
+  R01A = "Decongestants and other nasal preparations for topical use",
+  R03A = "Adrenergics, inhalants",
+  R03B = "Other drugs for obstructive airway diseases, inhalants",
+  R05D = "Cough suppressants, excluding combinations with expectorants",
+  S01A = "Antiinfectives",
+  S01B = "Antiinflammatory agents",
+  S01E = "Antiglaucoma preparations and miotics",
+  S01X = "Other ophthalmologicals"
+)
+
+add_atc3_labels <- function(data) {
+  if (!"atc3_label" %in% names(data)) {
+    data$atc3_label <- unname(key_atc3_labels[data$atc3])
+  }
+  data$atc3_label[is.na(data$atc3_label) | data$atc3_label == ""] <-
+    unname(key_atc3_labels[data$atc3[is.na(data$atc3_label) | data$atc3_label == ""]])
+  data$atc3_label[is.na(data$atc3_label) | data$atc3_label == ""] <-
+    paste0(data$atc3[is.na(data$atc3_label) | data$atc3_label == ""], " (ATC3 name not mapped)")
+  data
+}
+```
+
+```{r read-data}
+annual_summary <- read_required_csv("5.6_annual_polypharmacy_summary.csv")
+insurance_prevalence <- read_required_csv(
+  "5.6_annual_polypharmacy_prevalence_by_rx_insurance.csv"
+)
+table_one_polypharmacy <- read_required_csv(
+  "5.6_table_one_by_polypharmacy_categorical.csv"
+)
+distinct_atc3_distribution <- read_required_csv(
+  "5.6_distinct_atc3_distribution.csv"
+)
+atc3_prevalence <- add_atc3_labels(
+  read_required_csv("5.8_annual_polypharmacy_atc3_prevalence.csv")
+)
+```
+
+# Annual Polypharmacy
+
+## Summary
+
+```{r annual-summary-table, results='asis'}
+annual_summary_display <- data.frame(
+  `Analysis year` = annual_summary$analysis_year,
+  `Eligible patients` = comma_label(annual_summary$n_eligible_patient_years),
+  `Patients with polypharmacy` = comma_label(annual_summary$n_polypharmacy),
+  `Polypharmacy prevalence` = percent_label_from_pct(annual_summary$prevalence_pct),
+  `Mean days with >=5 ATC3 classes` = sprintf(
+    "%.1f",
+    as.numeric(annual_summary$mean_total_days_5plus)
+  ),
+  check.names = FALSE
+)
+cat(knitr::kable(annual_summary_display, row.names = FALSE), sep = "\n")
+```
+
+## Table 1
+
+```{r polypharmacy-table-one, results='asis'}
+print_table_one(format_table_one_display(
+  table_one_polypharmacy,
+  group_column = "polypharmacy_group",
+  denominator_column = "polypharmacy_denominator",
+  percent_column = "percent_within_polypharmacy_group",
+  group_labels = c(
+    "Without polypharmacy" = "Without polypharmacy",
+    "With polypharmacy" = "With polypharmacy"
+  )
+))
+```
+
+# Medication Class Count
+
+```{r distinct-atc3-distribution-plot}
+plot_distinct_atc3_distribution(distinct_atc3_distribution)
+```
+
+# Prescription Insurance
+
+```{r insurance-prevalence-plot}
+plot_insurance_prevalence(insurance_prevalence)
+```
+
+# Top 20 ATC3 Class Prevalence
+
+```{r atc3-prevalence-plot, fig.width=11, fig.height=7}
+plot_atc3_prevalence(atc3_prevalence)
+```

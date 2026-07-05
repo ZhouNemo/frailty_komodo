@@ -3,14 +3,17 @@ source("Code/5.0_annual_polypharmacy_helpers.R")
 # Project: Frailty_Komoto annual polypharmacy
 # Author: Nemo Zhou
 # Date started: 2026-07-03
-# Date last updated: 2026-07-03
+# Date last updated: 2026-07-04
 #
 # ---- Purpose ----
 # Calculate annual polypharmacy metrics from clipped ATC3 exposure episodes.
-# The patient-day expansion uses a day-offset table sized from the selected
-# analysis windows. Polypharmacy is defined as at least 5 active ATC3 classes on
-# at least 90 days in the patient-year. The final table keeps one row per
-# selected `2_annual_metric_ids` patient-year and writes:
+# The calculation collapses overlapping exposure intervals within each
+# patient-year and ATC3 class, converts those intervals to active-class count
+# change events, and sums the resulting spans where at least 5 ATC3 classes are
+# active. This avoids materializing one row per patient-day-ATC3 class while
+# preserving the same annual definition: at least 5 active ATC3 classes on at
+# least 90 days in the patient-year. The final table keeps one row per selected
+# `2_annual_metric_ids` patient-year and writes:
 #   - 6_annual_polypharmacy_metrics
 
 config <- get_annual_polypharmacy_config()
@@ -21,13 +24,17 @@ fills_identifier <- qualified_identifier(write_schema, config$fills_table)
 crosswalk_identifier <- qualified_identifier(write_schema, config$crosswalk_table)
 episodes_identifier <- qualified_identifier(write_schema, config$episodes_table)
 final_identifier <- qualified_identifier(write_schema, config$final_table)
-offsets_table <- "polypharmacy_day_offsets_5_5"
-active_atc3_table <- "polypharmacy_active_atc3_days_5_5"
-daily_counts_table <- "polypharmacy_daily_atc3_counts_5_5"
+merged_intervals_table <- "polypharmacy_atc3_merged_intervals_5_5"
+change_events_table <- "polypharmacy_atc3_change_events_5_5"
+active_spans_table <- "polypharmacy_active_atc3_spans_5_5"
+active_summary_table <- "polypharmacy_active_atc3_summary_5_5"
+atc3_summary_table <- "polypharmacy_atc3_summary_5_5"
 fill_mapping_table <- "polypharmacy_fill_mapping_status_5_5"
-offsets_identifier <- quote_identifier(offsets_table)
-active_atc3_identifier <- quote_identifier(active_atc3_table)
-daily_counts_identifier <- quote_identifier(daily_counts_table)
+merged_intervals_identifier <- quote_identifier(merged_intervals_table)
+change_events_identifier <- quote_identifier(change_events_table)
+active_spans_identifier <- quote_identifier(active_spans_table)
+active_summary_identifier <- quote_identifier(active_summary_table)
+atc3_summary_identifier <- quote_identifier(atc3_summary_table)
 fill_mapping_identifier <- quote_identifier(fill_mapping_table)
 
 for (table in c(config$ids_table, config$fills_table, config$crosswalk_table, config$episodes_table)) {
@@ -100,85 +107,230 @@ mapping_level_label <- if (length(mapping_levels) == 0L) {
   paste(unique(mapping_levels), collapse = "+")
 }
 
-max_window_days <- DBI::dbGetQuery(
-  con,
-  paste0(
-    "SELECT MAX(DATEDIFF(day, analysis_start_date, analysis_end_date) + 1)::INTEGER
-       AS max_window_days
-     FROM ", ids_identifier, "
-     WHERE analysis_year IN (", sql_values(config$analysis_years), ")"
+run_sql_stage <- function(label, sql) {
+  started_at <- Sys.time()
+  message(format(started_at, "[%Y-%m-%d %H:%M:%S] "), "START ", label)
+  execute_sql_with_retry(con, sql, label = label)
+  finished_at <- Sys.time()
+  elapsed_minutes <- round(
+    as.numeric(difftime(finished_at, started_at, units = "mins")),
+    1
   )
-)$max_window_days[[1]]
-
-if (is.na(max_window_days) || max_window_days <= 0L) {
-  stop("Could not determine a positive selected-year analysis window length.")
+  message(
+    format(finished_at, "[%Y-%m-%d %H:%M:%S] "),
+    "DONE  ",
+    label,
+    " (",
+    elapsed_minutes,
+    " min)"
+  )
+  invisible(NULL)
 }
 
-DatabaseConnector::executeSql(
-  con,
+run_sql_stage(
+  "Build merged ATC3 exposure intervals",
   paste0(
-    "DROP TABLE IF EXISTS ", offsets_identifier, ";
-     CREATE TEMP TABLE ", offsets_identifier, " (
-       day_offset INTEGER NOT NULL
-     )
-     DISTSTYLE ALL
-     SORTKEY(day_offset);"
-  ),
-  progressBar = FALSE,
-  reportOverallTime = FALSE
-)
-execute_insert_batches(
-  con,
-  offsets_identifier,
-  c("day_offset"),
-  make_day_offsets(max_window_days),
-  numeric_columns = "day_offset"
-)
-
-execute_sql_with_retry(
-  con,
-  paste0(
-    "DROP TABLE IF EXISTS ", active_atc3_identifier, ";
-     CREATE TEMP TABLE ", active_atc3_identifier, " (
+    "DROP TABLE IF EXISTS ", merged_intervals_identifier, ";
+     CREATE TEMP TABLE ", merged_intervals_identifier, " (
        patid VARCHAR(256) NOT NULL,
        patient_id VARCHAR(256) NOT NULL,
        analysis_year INTEGER NOT NULL,
-       date_day DATE NOT NULL,
-       atc3 VARCHAR(16) NOT NULL
+       atc3 VARCHAR(16) NOT NULL,
+       interval_start DATE NOT NULL,
+       interval_end DATE NOT NULL
      )
      DISTKEY(patid)
-     SORTKEY(analysis_year, patid, date_day, atc3);
+     SORTKEY(analysis_year, patid, atc3, interval_start);
 
-     INSERT INTO ", active_atc3_identifier, " (
+     INSERT INTO ", merged_intervals_identifier, " (
        patid,
        patient_id,
        analysis_year,
-       date_day,
-       atc3
+       atc3,
+       interval_start,
+       interval_end
      )
-     SELECT DISTINCT
-       e.patid,
-       e.patient_id,
-       e.analysis_year,
-       DATEADD(day, o.day_offset, e.episode_start_clipped) AS date_day,
-       e.atc3
-     FROM ", episodes_identifier, " e
-     INNER JOIN ", offsets_identifier, " o
-       ON DATEADD(day, o.day_offset, e.episode_start_clipped) <= e.episode_end_clipped
-     WHERE e.analysis_year IN (", sql_values(config$analysis_years), ");
-
-     DROP TABLE IF EXISTS ", daily_counts_identifier, ";
-     CREATE TEMP TABLE ", daily_counts_identifier, " AS
+     WITH ordered_intervals AS (
+       SELECT
+         patid,
+         patient_id,
+         analysis_year,
+         atc3,
+         episode_start_clipped,
+         episode_end_clipped,
+         MAX(episode_end_clipped) OVER (
+           PARTITION BY patid, patient_id, analysis_year, atc3
+           ORDER BY episode_start_clipped, episode_end_clipped
+           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+         ) AS previous_max_end
+       FROM ", episodes_identifier, "
+       WHERE analysis_year IN (", sql_values(config$analysis_years), ")
+         AND atc3 IS NOT NULL
+         AND atc3 <> ''
+         AND episode_start_clipped IS NOT NULL
+         AND episode_end_clipped IS NOT NULL
+         AND episode_end_clipped >= episode_start_clipped
+     ),
+     interval_flags AS (
+       SELECT
+         *,
+         CASE
+           WHEN previous_max_end IS NULL THEN 1
+           WHEN episode_start_clipped > DATEADD(day, 1, previous_max_end) THEN 1
+           ELSE 0
+         END AS starts_new_interval
+       FROM ordered_intervals
+     ),
+     interval_groups AS (
+       SELECT
+         *,
+         SUM(starts_new_interval) OVER (
+           PARTITION BY patid, patient_id, analysis_year, atc3
+           ORDER BY episode_start_clipped, episode_end_clipped
+           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+         ) AS interval_group
+       FROM interval_flags
+     )
      SELECT
        patid,
        patient_id,
        analysis_year,
-       date_day,
-       COUNT(DISTINCT atc3)::INTEGER AS daily_atc3_count
-     FROM ", active_atc3_identifier, "
-     GROUP BY patid, patient_id, analysis_year, date_day;
+       atc3,
+       MIN(episode_start_clipped) AS interval_start,
+       MAX(episode_end_clipped) AS interval_end
+     FROM interval_groups
+     GROUP BY patid, patient_id, analysis_year, atc3, interval_group;
+     "
+  )
+)
 
-     DROP TABLE IF EXISTS ", fill_mapping_identifier, ";
+run_sql_stage(
+  "Build ATC3 active-count change events",
+  paste0(
+    "DROP TABLE IF EXISTS ", change_events_identifier, ";
+     CREATE TEMP TABLE ", change_events_identifier, " (
+       patid VARCHAR(256) NOT NULL,
+       patient_id VARCHAR(256) NOT NULL,
+       analysis_year INTEGER NOT NULL,
+       event_date DATE NOT NULL,
+       atc3_delta INTEGER NOT NULL
+     )
+     DISTKEY(patid)
+     SORTKEY(analysis_year, patid, event_date);
+
+     INSERT INTO ", change_events_identifier, " (
+       patid,
+       patient_id,
+       analysis_year,
+       event_date,
+       atc3_delta
+     )
+     SELECT
+       patid,
+       patient_id,
+       analysis_year,
+       event_date,
+       SUM(atc3_delta)::INTEGER AS atc3_delta
+     FROM (
+       SELECT
+         patid,
+         patient_id,
+         analysis_year,
+         interval_start AS event_date,
+         1 AS atc3_delta
+       FROM ", merged_intervals_identifier, "
+       UNION ALL
+       SELECT
+         patid,
+         patient_id,
+         analysis_year,
+         DATEADD(day, 1, interval_end) AS event_date,
+         -1 AS atc3_delta
+       FROM ", merged_intervals_identifier, "
+     ) events
+     GROUP BY patid, patient_id, analysis_year, event_date;
+     "
+  )
+)
+
+run_sql_stage(
+  "Build ATC3 active-count spans",
+  paste0(
+    "DROP TABLE IF EXISTS ", active_spans_identifier, ";
+     CREATE TEMP TABLE ", active_spans_identifier, " AS
+     WITH running_counts AS (
+       SELECT
+         patid,
+         patient_id,
+         analysis_year,
+         event_date,
+         CAST(
+           SUM(atc3_delta) OVER (
+             PARTITION BY patid, patient_id, analysis_year
+             ORDER BY event_date
+             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+           ) AS INTEGER
+         ) AS active_atc3_count,
+         LEAD(event_date) OVER (
+           PARTITION BY patid, patient_id, analysis_year
+           ORDER BY event_date
+         ) AS next_event_date
+       FROM ", change_events_identifier, "
+     )
+     SELECT
+       patid,
+       patient_id,
+       analysis_year,
+       event_date AS span_start,
+       next_event_date AS span_end_exclusive,
+       active_atc3_count,
+       DATEDIFF(day, event_date, next_event_date)::INTEGER AS span_days
+     FROM running_counts
+     WHERE next_event_date IS NOT NULL
+       AND next_event_date > event_date;
+     "
+  )
+)
+
+run_sql_stage(
+  "Summarize annual active ATC3 days",
+  paste0(
+    "DROP TABLE IF EXISTS ", active_summary_identifier, ";
+     CREATE TEMP TABLE ", active_summary_identifier, " AS
+     SELECT
+       patid,
+       patient_id,
+       analysis_year,
+       SUM(CASE WHEN active_atc3_count >= 5 THEN span_days ELSE 0 END)::INTEGER
+         AS total_days_5plus,
+       SUM(CASE WHEN active_atc3_count >= 1 THEN span_days ELSE 0 END)::INTEGER
+         AS n_active_class_days
+     FROM ", active_spans_identifier, "
+     GROUP BY patid, patient_id, analysis_year;
+     "
+  )
+)
+
+run_sql_stage(
+  "Summarize annual distinct ATC3 classes",
+  paste0(
+    "DROP TABLE IF EXISTS ", atc3_summary_identifier, ";
+     CREATE TEMP TABLE ", atc3_summary_identifier, " AS
+     SELECT
+       patid,
+       patient_id,
+       analysis_year,
+       COUNT(DISTINCT atc3)::INTEGER AS n_distinct_atc3
+     FROM ", merged_intervals_identifier, "
+     GROUP BY patid, patient_id, analysis_year;
+     "
+  )
+)
+
+run_sql_stage(
+  "Summarize NDC11 mapping coverage for fills",
+  paste0(
+    "DROP TABLE IF EXISTS ", fill_mapping_identifier, ";
      CREATE TEMP TABLE ", fill_mapping_identifier, " AS
      SELECT
        f.patid,
@@ -204,12 +356,11 @@ execute_sql_with_retry(
        f.analysis_year,
        COALESCE(f.pharmacy_event_id, f.patid || '|' || f.fill_date::VARCHAR || '|' || f.ndc11),
        f.ndc11;"
-  ),
-  label = "polypharmacy day-level staging"
+  )
 )
 
-execute_sql_with_retry(
-  con,
+run_sql_stage(
+  "Build final annual polypharmacy metrics table",
   paste0(
     "DELETE FROM ", final_identifier, "
      WHERE analysis_year IN (", sql_values(config$analysis_years), ");
@@ -236,20 +387,17 @@ execute_sql_with_retry(
          patid,
          patient_id,
          analysis_year,
-         SUM(CASE WHEN daily_atc3_count >= 5 THEN 1 ELSE 0 END)::INTEGER
-           AS total_days_5plus,
-         COUNT(*)::INTEGER AS n_active_class_days
-       FROM ", daily_counts_identifier, "
-       GROUP BY patid, patient_id, analysis_year
+         total_days_5plus,
+         n_active_class_days
+       FROM ", active_summary_identifier, "
      ),
      atc3_summary AS (
        SELECT
          patid,
          patient_id,
          analysis_year,
-         COUNT(DISTINCT atc3)::INTEGER AS n_distinct_atc3
-       FROM ", active_atc3_identifier, "
-       GROUP BY patid, patient_id, analysis_year
+         n_distinct_atc3
+       FROM ", atc3_summary_identifier, "
      ),
      fill_summary AS (
        SELECT
@@ -295,8 +443,7 @@ execute_sql_with_retry(
        ON ids.patid = f.patid
       AND ids.analysis_year = f.analysis_year
      WHERE ids.analysis_year IN (", sql_values(config$analysis_years), ");"
-  ),
-  label = "annual polypharmacy metric final table build"
+  )
 )
 
 final_qa <- print_query(

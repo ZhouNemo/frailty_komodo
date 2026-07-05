@@ -574,12 +574,13 @@ Run this after `5.3_stage_polypharmacy_ndc11_atc_crosswalk.R`.
 
 ## `5.5_calculate_annual_polypharmacy_metrics.R`
 
-Expands clipped ATC3 exposure episodes to patient-day active class counts using
-a day-offset table sized from the selected `2_annual_metric_ids` analysis
-windows, deduplicates multiple drugs in the same ATC3 class on the same day,
-and flags polypharmacy when at least 5 ATC3 classes are active on at least
-90 days in the patient-year. It left joins results back to every selected row
-in `2_annual_metric_ids` and writes:
+Calculates annual polypharmacy metrics from clipped ATC3 exposure episodes
+without materializing every patient-day-ATC3 row. It collapses overlapping
+exposure intervals within each patient-year and ATC3 class, converts those
+intervals to active-class count change events, sums the spans where at least 5
+ATC3 classes are active, and flags polypharmacy when that count reaches at
+least 90 days in the patient-year. It left joins results back to every selected
+row in `2_annual_metric_ids` and writes:
 
 ```text
 6_annual_polypharmacy_metrics
@@ -600,24 +601,68 @@ prevalence section are suppressed before CSV export. It writes:
 
 ```text
 Outputs/5.6_annual_polypharmacy_metrics_qa.csv
+Outputs/5.6_annual_polypharmacy_summary.csv
+Outputs/5.6_annual_polypharmacy_prevalence_by_rx_insurance.csv
+Outputs/5.6_table_one_by_polypharmacy_categorical.csv
+Outputs/5.6_distinct_atc3_distribution.csv
 ```
 
 Run this after `5.5_calculate_annual_polypharmacy_metrics.R`.
 
 ## `5.7_run_annual_polypharmacy.R`
 
-Run-all wrapper for the `5.x` annual polypharmacy flow. It sources `5.1`,
-`5.2`, `5.3`, `5.4`, `5.5`, and `5.6` in order. The default configuration is
-2016 only. The runner sets the reviewed transaction filter
-`transaction_result_keep = c("PAID")` and a date-stamped
-`mapping_version_date` in `frailty.annual_polypharmacy.config` before sourcing
-the stages (restoring any prior option value on exit), so the pipeline runs end
-to end without stopping at `5.1`. The `PAID`-only decision and its supporting
-2016 transaction-value counts are documented in
-`Documents/12_POLYPHARMACY_DATA_PROCESSING_FLOW.md`.
+Standard annual runner for the `5.x` annual polypharmacy flow. Edit the
+`analysis_year` value in the annual run settings block at the top of the file,
+then source the runner from R. The runner sets the reviewed transaction filter
+`transaction_result_keep = c("PAID")`, uses a year-specific
+`mapping_version_date`, writes the selected-year unique NDC11 export, and uses a
+year-specific crosswalk path:
 
-Use this after reviewing the configured years. The runner will stop at `5.3`
-with a clear message if the n2c/RxNav crosswalk CSV has not yet been saved.
+```text
+Outputs/5.3_polypharmacy_ndc11_atc_crosswalk_<year>.csv
+```
+
+If the selected-year crosswalk is missing, the runner sources `5.1` and `5.2`,
+then stops with the exact PowerShell command needed to run the external n2c/RxNav
+mapping step. After that command completes, source `5.7` again; it will continue
+with `5.3`, `5.4`, `5.5`, `5.6`, and `5.8`. The runner restores any prior
+`frailty.annual_polypharmacy.config` option on exit.
+
+Durable Redshift tables are refreshed only for the selected `analysis_year`;
+local report-ready CSVs in `Outputs` reflect the latest selected run. The
+`PAID`-only decision and its supporting 2016 transaction-value counts are
+documented in `Documents/12_POLYPHARMACY_DATA_PROCESSING_FLOW.md`.
+
+## `5.8_describe_annual_polypharmacy_atc3_prevalence.R`
+
+Descriptive aggregate script for annual ATC3 class prevalence among the top 20
+mapped medication classes in each analysis year. It reads the selected annual
+denominator and clipped ATC3 exposure episodes, counts eligible patient-years
+with at least one exposure to each ranked ATC3 class, adds readable ATC3 class
+labels where available, and exports overall and prescription-insurance-
+stratified prevalence summaries. Small cells are suppressed before CSV export.
+It writes:
+
+```text
+Outputs/5.8_annual_polypharmacy_atc3_prevalence.csv
+Outputs/5.8_annual_polypharmacy_atc3_prevalence_by_rx_insurance.csv
+```
+
+Run this after `5.4_build_annual_polypharmacy_exposures.R`. It can be run
+before or after `5.5` because it does not depend on
+`6_annual_polypharmacy_metrics`.
+
+## `5.9_visualize_annual_polypharmacy_outputs.Rmd`
+
+CSV-only R Markdown report for annual polypharmacy outputs. It reads the
+report-ready CSVs written by `5.6` and `5.8` from the project-root `Outputs`
+folder and renders annual polypharmacy summaries, a Table 1 by polypharmacy
+status, a distinct ATC3 medication-class count histogram, a
+prescription-insurance prevalence plot, and a top-20 ATC3 class prevalence plot.
+It does not connect to Redshift.
+
+Run this after `5.6_check_annual_polypharmacy_metrics.R` and
+`5.8_describe_annual_polypharmacy_atc3_prevalence.R`.
 
 ## `Code/Old`
 

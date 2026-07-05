@@ -3,14 +3,15 @@ source("Code/5.0_annual_polypharmacy_helpers.R")
 # Project: Frailty_Komoto annual polypharmacy QA
 # Author: Nemo Zhou
 # Date started: 2026-07-03
-# Date last updated: 2026-07-04
+# Date last updated: 2026-07-05
 #
 # ---- Purpose ----
 # Run aggregate QA for the 5.x annual polypharmacy pipeline. The checks validate
 # source schemas, selected-year table presence, denominator completeness,
 # durable extraction QA, NDC mapping coverage, exposure interval validity,
-# final-table completeness, and duplicate keys. Patient-level rows are not
-# printed. Small insurance-prevalence cells are suppressed before CSV export.
+# final-table completeness, duplicate keys, and report-ready Table 1 summaries.
+# Patient-level rows are not printed. Small cells are suppressed before CSV
+# export.
 
 config <- get_annual_polypharmacy_config()
 con <- connect_komodo()
@@ -74,6 +75,70 @@ if (length(missing_write_tables) > 0L) {
 }
 
 qa_results <- list()
+
+selected_mapping_sql <- paste0(
+  "SELECT DISTINCT mapping_source, mapping_version_date
+   FROM ", final_identifier, "
+   WHERE analysis_year IN (", sql_values(config$analysis_years), ")
+     AND mapping_source IS NOT NULL
+     AND mapping_version_date IS NOT NULL"
+)
+
+suppress_count_columns <- function(data, suppress_rows, columns) {
+  for (column in columns) {
+    if (column %in% names(data)) {
+      data[[column]] <- as.numeric(data[[column]])
+      data[[column]][suppress_rows] <- NA_real_
+    }
+  }
+  data
+}
+
+age_group_expr <- "CASE
+  WHEN ids.age BETWEEN 40 AND 49 THEN '40-49'
+  WHEN ids.age BETWEEN 50 AND 64 THEN '50-64'
+  WHEN ids.age BETWEEN 65 AND 74 THEN '65-74'
+  WHEN ids.age BETWEEN 75 AND 84 THEN '75-84'
+  WHEN ids.age >= 85 THEN '85+'
+  ELSE 'Unknown'
+END"
+sex_expr <- "COALESCE(NULLIF(ids.patient_gender, ''), 'Unknown')"
+race_expr <- "COALESCE(NULLIF(ids.patient_race_ethnicity, ''), 'Unknown')"
+mx_insurance_expr <- "COALESCE(NULLIF(ids.mx_insurance_group, ''), 'Unknown')"
+mx_segment_expr <- "COALESCE(NULLIF(ids.mx_insurance_segment, ''), 'Unknown')"
+rx_insurance_expr <- "COALESCE(NULLIF(ids.rx_insurance_group, ''), 'Unknown')"
+rx_segment_expr <- "COALESCE(NULLIF(ids.rx_insurance_segment, ''), 'Unknown')"
+polypharmacy_group_expr <- "CASE
+  WHEN final.polypharmacy = 1 THEN 'With polypharmacy'
+  ELSE 'Without polypharmacy'
+END"
+
+table_one_category_exprs <- list(
+  age_group = age_group_expr,
+  sex = sex_expr,
+  race_ethnicity = race_expr,
+  mx_insurance_group = mx_insurance_expr,
+  mx_insurance_segment = mx_segment_expr,
+  rx_insurance_group = rx_insurance_expr,
+  rx_insurance_segment = rx_segment_expr
+)
+
+table_one_categorical_sql <- function(variable_name, category_expr) {
+  paste0(
+    "SELECT
+       ids.analysis_year,
+       ", polypharmacy_group_expr, " AS polypharmacy_group,
+       ", sql_string(variable_name), " AS variable,
+       ", category_expr, " AS category,
+       COUNT(*)::BIGINT AS n_patients
+     FROM ", ids_identifier, " ids
+     INNER JOIN ", final_identifier, " final
+       ON ids.patid = final.patid
+      AND ids.analysis_year = final.analysis_year
+     WHERE ids.analysis_year IN (", sql_values(config$analysis_years), ")
+     GROUP BY ids.analysis_year, ", polypharmacy_group_expr, ", ", category_expr
+  )
+}
 
 qa_results$denominator <- DBI::dbGetQuery(
   con,
@@ -152,10 +217,13 @@ qa_results$mapping_coverage <- DBI::dbGetQuery(
   con,
   paste0(
     "WITH selected_mapping AS (
-       SELECT *
-       FROM ", crosswalk_identifier, "
-       WHERE mapping_source = ", sql_string(config$mapping_source), "
-         AND mapping_version_date = ", sql_string(config$mapping_version_date), "
+       SELECT cw.*
+       FROM ", crosswalk_identifier, " cw
+       INNER JOIN (
+         ", selected_mapping_sql, "
+       ) selected_versions
+         ON cw.mapping_source = selected_versions.mapping_source
+        AND cw.mapping_version_date = selected_versions.mapping_version_date
      ),
      total_submitted AS (
        SELECT COUNT(DISTINCT ndc11)::DOUBLE PRECISION AS n_unique_submitted
@@ -192,10 +260,13 @@ qa_results$multi_mapping <- DBI::dbGetQuery(
          ndc11,
          COUNT(DISTINCT atc4) AS n_distinct_atc4,
          COUNT(DISTINCT atc3) AS n_distinct_atc3
-       FROM ", crosswalk_identifier, "
-       WHERE mapping_source = ", sql_string(config$mapping_source), "
-         AND mapping_version_date = ", sql_string(config$mapping_version_date), "
-         AND mapping_status = 'mapped'
+       FROM ", crosswalk_identifier, " cw
+       INNER JOIN (
+         ", selected_mapping_sql, "
+       ) selected_versions
+         ON cw.mapping_source = selected_versions.mapping_source
+        AND cw.mapping_version_date = selected_versions.mapping_version_date
+       WHERE cw.mapping_status = 'mapped'
        GROUP BY ndc11
      ) x"
   )
@@ -219,13 +290,16 @@ qa_results$mapping_fill_coverage <- DBI::dbGetQuery(
        ) AS pct_fill_rows
      FROM ", fills_identifier, " f
      LEFT JOIN (
-       SELECT DISTINCT ndc11
-       FROM ", crosswalk_identifier, "
-       WHERE mapping_source = ", sql_string(config$mapping_source), "
-         AND mapping_version_date = ", sql_string(config$mapping_version_date), "
-         AND mapping_status = 'mapped'
-         AND atc3 IS NOT NULL
-         AND atc3 <> ''
+       SELECT DISTINCT cw.ndc11
+       FROM ", crosswalk_identifier, " cw
+       INNER JOIN (
+         ", selected_mapping_sql, "
+       ) selected_versions
+         ON cw.mapping_source = selected_versions.mapping_source
+        AND cw.mapping_version_date = selected_versions.mapping_version_date
+       WHERE cw.mapping_status = 'mapped'
+         AND cw.atc3 IS NOT NULL
+         AND cw.atc3 <> ''
      ) cw
        ON f.ndc11 = cw.ndc11
      WHERE f.analysis_year IN (", sql_values(config$analysis_years), ")
@@ -330,23 +404,120 @@ qa_results$insurance_prevalence <- DBI::dbGetQuery(
      ORDER BY ids.analysis_year, n_patient_years DESC"
   )
 )
-qa_results$insurance_prevalence$suppression_applied <- ifelse(
+qa_results$insurance_prevalence$n_patient_years <- as.numeric(
+  qa_results$insurance_prevalence$n_patient_years
+)
+qa_results$insurance_prevalence$n_polypharmacy <- as.numeric(
+  qa_results$insurance_prevalence$n_polypharmacy
+)
+qa_results$insurance_prevalence$prevalence_pct <- round(
+  100 * qa_results$insurance_prevalence$n_polypharmacy /
+    qa_results$insurance_prevalence$n_patient_years,
+  4
+)
+insurance_suppressed <- (
   is.na(qa_results$insurance_prevalence$n_patient_years) |
     qa_results$insurance_prevalence$n_patient_years < min_count |
     is.na(qa_results$insurance_prevalence$n_polypharmacy) |
-    qa_results$insurance_prevalence$n_polypharmacy < min_count,
+    qa_results$insurance_prevalence$n_polypharmacy < min_count
+)
+qa_results$insurance_prevalence$suppression_applied <- ifelse(
+  insurance_suppressed,
   "yes",
   "no"
 )
-qa_results$insurance_prevalence$n_patient_years <- ifelse(
-  qa_results$insurance_prevalence$n_patient_years < min_count,
-  NA,
-  qa_results$insurance_prevalence$n_patient_years
+qa_results$insurance_prevalence <- suppress_count_columns(
+  qa_results$insurance_prevalence,
+  insurance_suppressed,
+  c("n_patient_years", "n_polypharmacy", "prevalence_pct")
 )
-qa_results$insurance_prevalence$n_polypharmacy <- ifelse(
-  qa_results$insurance_prevalence$n_polypharmacy < min_count,
-  NA,
-  qa_results$insurance_prevalence$n_polypharmacy
+
+table_one_categorical <- DBI::dbGetQuery(
+  con,
+  paste0(
+    "WITH categorical AS (
+       ",
+    paste(
+      unlist(Map(table_one_categorical_sql, names(table_one_category_exprs), table_one_category_exprs)),
+      collapse = "\nUNION ALL\n"
+    ),
+    "
+     ),
+     denominators AS (
+       SELECT
+         ids.analysis_year,
+         ", polypharmacy_group_expr, " AS polypharmacy_group,
+         COUNT(*)::BIGINT AS polypharmacy_denominator
+       FROM ", ids_identifier, " ids
+       INNER JOIN ", final_identifier, " final
+         ON ids.patid = final.patid
+        AND ids.analysis_year = final.analysis_year
+       WHERE ids.analysis_year IN (", sql_values(config$analysis_years), ")
+       GROUP BY ids.analysis_year, ", polypharmacy_group_expr, "
+     )
+     SELECT
+       c.analysis_year,
+       c.polypharmacy_group,
+       c.variable,
+       c.category,
+       d.polypharmacy_denominator,
+       CASE WHEN c.n_patients BETWEEN 1 AND ", min_count - 1L, "
+            THEN NULL ELSE c.n_patients END AS n_patients,
+       CASE WHEN c.n_patients BETWEEN 1 AND ", min_count - 1L, "
+            THEN NULL ELSE c.n_patients::DOUBLE PRECISION /
+              d.polypharmacy_denominator END AS percent_within_polypharmacy_group,
+       CASE WHEN c.n_patients BETWEEN 1 AND ", min_count - 1L, "
+            THEN TRUE ELSE FALSE END AS small_cell_suppressed
+     FROM categorical c
+     INNER JOIN denominators d
+       ON c.analysis_year = d.analysis_year
+      AND c.polypharmacy_group = d.polypharmacy_group
+     WHERE d.polypharmacy_denominator >= ", min_count, "
+     ORDER BY c.analysis_year, c.polypharmacy_group, c.variable, c.category"
+  )
+)
+
+distinct_atc3_distribution <- DBI::dbGetQuery(
+  con,
+  paste0(
+    "WITH distribution AS (
+       SELECT
+         analysis_year,
+         n_distinct_atc3,
+         COUNT(*)::BIGINT AS n_patients
+       FROM ", final_identifier, "
+       WHERE analysis_year IN (", sql_values(config$analysis_years), ")
+       GROUP BY analysis_year, n_distinct_atc3
+     ),
+     denominators AS (
+       SELECT
+         analysis_year,
+         COUNT(*)::BIGINT AS n_eligible_patients
+       FROM ", final_identifier, "
+       WHERE analysis_year IN (", sql_values(config$analysis_years), ")
+       GROUP BY analysis_year
+     )
+     SELECT
+       d.analysis_year,
+       d.n_distinct_atc3,
+       CASE WHEN d.n_patients BETWEEN 1 AND ", min_count - 1L, "
+            THEN NULL ELSE d.n_patients END AS n_patients,
+       den.n_eligible_patients,
+       CASE WHEN d.n_patients BETWEEN 1 AND ", min_count - 1L, "
+            THEN NULL ELSE
+              CAST(
+                100.0 * d.n_patients::DOUBLE PRECISION /
+                  NULLIF(den.n_eligible_patients, 0)
+                AS DECIMAL(18, 4)
+              )
+       END AS percent_patients,
+       CASE WHEN d.n_patients BETWEEN 1 AND ", min_count - 1L, "
+            THEN TRUE ELSE FALSE END AS small_cell_suppressed
+     FROM distribution d
+     INNER JOIN denominators den
+       ON d.analysis_year = den.analysis_year
+     ORDER BY d.analysis_year, d.n_distinct_atc3"
+  )
 )
 
 for (name in names(qa_results)) {
@@ -376,7 +547,11 @@ qa_frames <- lapply(
   names(qa_results),
   function(name) {
     data <- qa_results[[name]]
-    data$qa_section <- name
+    if (nrow(data) == 0L) {
+      data$qa_section <- character(0)
+    } else {
+      data$qa_section <- name
+    }
     data[] <- lapply(data, as.character)
     data
   }
@@ -387,7 +562,7 @@ qa_frames <- lapply(
   function(data) {
     missing_columns <- setdiff(all_columns, names(data))
     for (column in missing_columns) {
-      data[[column]] <- NA_character_
+      data[[column]] <- rep(NA_character_, nrow(data))
     }
     data[, all_columns, drop = FALSE]
   }
@@ -397,10 +572,71 @@ qa_output <- do.call(rbind, qa_frames)
 qa_path <- file.path(config$output_dir, "5.6_annual_polypharmacy_metrics_qa.csv")
 utils::write.csv(qa_output, qa_path, row.names = FALSE)
 
+annual_summary <- qa_results$polypharmacy_distribution
+annual_summary$n_rows <- as.numeric(annual_summary$n_rows)
+annual_summary$n_polypharmacy <- as.numeric(annual_summary$n_polypharmacy)
+annual_summary$prevalence_pct <- round(
+  100 * annual_summary$n_polypharmacy / annual_summary$n_rows,
+  4
+)
+annual_summary <- annual_summary[
+  ,
+  c(
+    "analysis_year",
+    "n_rows",
+    "n_polypharmacy",
+    "prevalence_pct",
+    "min_total_days_5plus",
+    "max_total_days_5plus",
+    "mean_total_days_5plus"
+  ),
+  drop = FALSE
+]
+names(annual_summary)[names(annual_summary) == "n_rows"] <-
+  "n_eligible_patient_years"
+
+annual_summary_path <- file.path(
+  config$output_dir,
+  "5.6_annual_polypharmacy_summary.csv"
+)
+insurance_prevalence_path <- file.path(
+  config$output_dir,
+  "5.6_annual_polypharmacy_prevalence_by_rx_insurance.csv"
+)
+table_one_path <- file.path(
+  config$output_dir,
+  "5.6_table_one_by_polypharmacy_categorical.csv"
+)
+distinct_atc3_distribution_path <- file.path(
+  config$output_dir,
+  "5.6_distinct_atc3_distribution.csv"
+)
+utils::write.csv(annual_summary, annual_summary_path, row.names = FALSE)
+utils::write.csv(
+  qa_results$insurance_prevalence,
+  insurance_prevalence_path,
+  row.names = FALSE
+)
+utils::write.csv(table_one_categorical, table_one_path, row.names = FALSE)
+utils::write.csv(
+  distinct_atc3_distribution,
+  distinct_atc3_distribution_path,
+  row.names = FALSE
+)
+
 message(
   config$workflow_label,
   " QA complete. Aggregate QA written to: ",
-  qa_path
+  qa_path,
+  ". Report inputs written to: ",
+  annual_summary_path,
+  ", ",
+  insurance_prevalence_path,
+  ", ",
+  table_one_path,
+  ", and ",
+  distinct_atc3_distribution_path,
+  "."
 )
 
 disconnect_komodo(con)
