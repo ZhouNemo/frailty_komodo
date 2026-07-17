@@ -1,0 +1,526 @@
+---
+title: "Clinical Metrics by Medical Insurance Group"
+author: "Nemo Zhou"
+date: "2026-07-10"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+params:
+  descriptive_output_dir: null
+  analysis_year_label: null
+---
+
+<!--
+Project: Frailty_Komoto clinical metrics by medical insurance visualization
+Author: Nemo Zhou
+Date started: 2026-07-10
+Date last updated: 2026-07-16
+
+Purpose:
+This R Markdown report visualizes aggregate annual clinical metrics outputs
+created by Code/2_EDA/4.1_describe_annual_clinical_metrics.R. It does not connect to
+Redshift. It reads aggregate CSV files from the project-root Outputs folder and
+renders CFI frailty level, Gagne score level, HIV-positive prevalence, and CCW
+group prevalence by age group, sex, and race/ethnicity within medical insurance
+comparison groups. Medicare is split into Medicare Advantage and Medicare FFS.
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 12,
+  fig.height = 5.5
+)
+
+library(ggplot2)
+```
+
+```{r helpers}
+if (!is.null(params$descriptive_output_dir) && nzchar(params$descriptive_output_dir)) {
+  output_dir <- params$descriptive_output_dir
+} else {
+  output_roots <- c("Outputs", "../Outputs", "../../Outputs")
+  output_subdirs <- c(
+    "4.1_annual_clinical_metrics_descriptive_2025",
+    "4.1_annual_clinical_metrics_descriptive"
+  )
+  output_grid <- expand.grid(
+    root = output_roots,
+    subdir = output_subdirs,
+    stringsAsFactors = FALSE
+  )
+  output_dir_candidates <- file.path(output_grid$root, output_grid$subdir)
+  output_dir <- output_dir_candidates[dir.exists(output_dir_candidates)][1]
+}
+
+if (is.null(output_dir) || is.na(output_dir) || !dir.exists(output_dir)) {
+  stop(
+    "Could not find the clinical metrics descriptive output directory. ",
+    "Run Code/2_EDA/4.1_describe_annual_clinical_metrics.R first."
+  )
+}
+
+read_required_csv <- function(file_name) {
+  path <- file.path(output_dir, file_name)
+  if (!file.exists(path)) {
+    stop(
+      "Missing required file: ",
+      path,
+      ". Rerun Code/2_EDA/4.4_run_annual_clinical_metrics_descriptive_analysis.R ",
+      "for this year so the medical-insurance comparison CSVs are available."
+    )
+  }
+
+  utils::read.csv(path, stringsAsFactors = FALSE, check.names = FALSE)
+}
+
+comma_label <- function(x) {
+  format(round(as.numeric(x)), big.mark = ",", scientific = FALSE, trim = TRUE)
+}
+
+percent_axis_label <- function(x) {
+  paste0(sprintf("%.1f", 100 * as.numeric(x)), "%")
+}
+
+wrap_label <- function(x, width = 18) {
+  vapply(
+    as.character(x),
+    function(value) paste(strwrap(value, width = width), collapse = "\n"),
+    character(1)
+  )
+}
+
+insurance_order <- c(
+  "Commercial",
+  "Medicaid",
+  "Medicare Advantage",
+  "Medicare FFS"
+)
+
+subgroup_labels <- c(
+  age_group = "Age group",
+  sex = "Sex",
+  race_ethnicity = "Race/ethnicity"
+)
+
+subgroup_order <- c("age_group", "sex", "race_ethnicity")
+
+metric_palette <- c(
+  "Commercial" = "#2E86AB",
+  "Medicaid" = "#7D5BA6",
+  "Medicare Advantage" = "#3F7C85",
+  "Medicare FFS" = "#A44A3F"
+)
+
+cfi_level_palette <- c(
+  "Non-frail" = "#2E7D32",
+  "Prefrail" = "#F9A825",
+  "Frail" = "#C62828"
+)
+
+gagne_level_palette <- c(
+  "Gagne <0" = "#6A4C93",
+  "Gagne 0" = "#2E86AB",
+  "Gagne 1-2" = "#52B788",
+  "Gagne 3-5" = "#F9C74F",
+  "Gagne 6+" = "#D62828"
+)
+
+fill_palette <- c(
+  "#2E86AB",
+  "#7D5BA6",
+  "#3F7C85",
+  "#A44A3F",
+  "#F2B134",
+  "#6A994E",
+  "#B56576",
+  "#577590",
+  "#BC6C25",
+  "#4D908E"
+)
+
+ccw_group_labels <- c(
+  CV = "Cardiovascular and metabolic",
+  LDND = "Learning/developmental/neurologic disability",
+  MH = "Mental health",
+  MUSC = "Musculoskeletal and mobility-related",
+  OCC = "Other chronic conditions",
+  PULM = "Pulmonary",
+  SENSE = "Sensory conditions",
+  SU = "Substance use"
+)
+
+prepare_insurance_data <- function(data, numeric_columns) {
+  for (column in intersect(numeric_columns, names(data))) {
+    data[[column]] <- suppressWarnings(as.numeric(data[[column]]))
+  }
+  data$mx_insurance_comparison_group <- factor(
+    data$mx_insurance_comparison_group,
+    levels = insurance_order
+  )
+  data <- data[!is.na(data$mx_insurance_comparison_group), , drop = FALSE]
+  data
+}
+
+order_stratum_values <- function(values) {
+  values <- unique(as.character(values))
+  age_order <- c("40-49", "50-64", "65-74", "75-84", "85+", "UNKNOWN")
+  sex_order <- c("F", "M", "UNKNOWN")
+  if (all(values %in% age_order)) {
+    return(age_order[age_order %in% values])
+  }
+  if (all(values %in% sex_order)) {
+    return(sex_order[sex_order %in% values])
+  }
+  sort(values)
+}
+
+format_bar_label <- function(x) {
+  value <- suppressWarnings(as.numeric(x))
+  ifelse(is.na(value), "", paste0(sprintf("%.1f", 100 * value), "%"))
+}
+
+prepare_metric_level_data <- function(data, level_column, level_order) {
+  data <- prepare_insurance_data(
+    data,
+    c("subgroup_denominator", "n_person_years", "percent_within_subgroup")
+  )
+  data <- data[
+    !is.na(data$percent_within_subgroup) &
+      !is.na(data$subgroup_denominator) &
+      data$subgroup_denominator >= 11,
+    ,
+    drop = FALSE
+  ]
+  data$metric_level <- data[[level_column]]
+  data$metric_level <- factor(data$metric_level, levels = level_order)
+  data
+}
+
+plot_metric_level_distribution <- function(
+  data,
+  metric_label,
+  subgroup,
+  level_column,
+  level_order,
+  palette
+) {
+  plot_data <- prepare_metric_level_data(data, level_column, level_order)
+  plot_data <- plot_data[plot_data$stratification == subgroup, , drop = FALSE]
+  if (nrow(plot_data) == 0L) {
+    return(NULL)
+  }
+
+  plot_data$stratum_value <- factor(
+    plot_data$stratum_value,
+    levels = order_stratum_values(plot_data$stratum_value)
+  )
+  plot_data$bar_label <- format_bar_label(plot_data$percent_within_subgroup)
+
+  ggplot(
+    plot_data,
+    aes(
+      x = stratum_value,
+      y = percent_within_subgroup,
+      fill = metric_level
+    )
+  ) +
+    geom_col(width = 0.65, color = "white", linewidth = 0.2) +
+    geom_text(
+      aes(label = bar_label),
+      position = position_stack(vjust = 0.5),
+      color = "white",
+      size = 2.5
+    ) +
+    facet_wrap(~ mx_insurance_comparison_group, nrow = 1) +
+    scale_y_continuous(labels = percent_axis_label, expand = c(0, 0)) +
+    scale_x_discrete(labels = function(x) wrap_label(x, width = 14)) +
+    scale_fill_manual(values = palette, breaks = level_order, drop = FALSE) +
+    coord_cartesian(ylim = c(0, 1), clip = "off") +
+    labs(
+      title = paste(metric_label, "level distribution by", subgroup_labels[[subgroup]]),
+      x = NULL,
+      y = "Person-years",
+      fill = NULL
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid.major.x = element_blank(),
+      legend.position = "bottom"
+    )
+}
+
+plot_metric_summary <- function(data, metric_label, subgroup) {
+  plot_data <- prepare_insurance_data(
+    data,
+    c("n_person_years", "mean_value", "p25", "median", "p75")
+  )
+  plot_data <- plot_data[
+    plot_data$stratification == subgroup &
+      !is.na(plot_data$median) &
+      !is.na(plot_data$n_person_years) &
+      plot_data$n_person_years >= 11,
+    ,
+    drop = FALSE
+  ]
+  if (nrow(plot_data) == 0L) {
+    return(NULL)
+  }
+
+  plot_data$stratum_value <- factor(
+    plot_data$stratum_value,
+    levels = order_stratum_values(plot_data$stratum_value)
+  )
+
+  ggplot(
+    plot_data,
+    aes(
+      x = stratum_value,
+      y = median,
+      ymin = p25,
+      ymax = p75,
+      color = mx_insurance_comparison_group
+    )
+  ) +
+    geom_pointrange(linewidth = 0.45, fatten = 1.6) +
+    facet_wrap(~ mx_insurance_comparison_group, nrow = 1) +
+    scale_color_manual(values = metric_palette, drop = FALSE) +
+    labs(
+      title = paste(metric_label, "median and IQR by", subgroup_labels[[subgroup]]),
+      x = NULL,
+      y = metric_label,
+      color = NULL
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "none",
+      panel.grid.major.x = element_blank()
+    )
+}
+
+plot_hiv_prevalence <- function(data, subgroup) {
+  plot_data <- prepare_insurance_data(
+    data,
+    c("denominator_person_years", "n_hiv_positive", "hiv_positive_prevalence")
+  )
+  plot_data <- plot_data[
+    plot_data$stratification == subgroup &
+      !is.na(plot_data$hiv_positive_prevalence) &
+      !is.na(plot_data$denominator_person_years) &
+      plot_data$denominator_person_years >= 11,
+    ,
+    drop = FALSE
+  ]
+  if (nrow(plot_data) == 0L) {
+    return(NULL)
+  }
+
+  plot_data$stratum_value <- factor(
+    plot_data$stratum_value,
+    levels = order_stratum_values(plot_data$stratum_value)
+  )
+
+  ggplot(
+    plot_data,
+    aes(
+      x = mx_insurance_comparison_group,
+      y = hiv_positive_prevalence,
+      fill = stratum_value
+    )
+  ) +
+    geom_col(position = position_dodge2(width = 0.85, preserve = "single"), width = 0.72) +
+    geom_text(
+      aes(label = format_bar_label(hiv_positive_prevalence)),
+      position = position_dodge2(width = 0.85, preserve = "single"),
+      vjust = -0.25,
+      size = 2.8
+    ) +
+    facet_wrap(~ analysis_year) +
+    scale_y_continuous(labels = percent_axis_label, expand = expansion(mult = c(0, 0.12))) +
+    scale_x_discrete(labels = function(x) wrap_label(x, width = 12)) +
+    scale_fill_manual(values = fill_palette, drop = FALSE) +
+    labs(
+      title = paste("HIV-positive prevalence by", subgroup_labels[[subgroup]]),
+      x = NULL,
+      y = "HIV-positive prevalence",
+      fill = subgroup_labels[[subgroup]]
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(
+      axis.text.x = element_text(size = 9),
+      panel.grid.major.x = element_blank(),
+      legend.position = "bottom"
+    )
+}
+
+plot_ccw_group_prevalence <- function(data, subgroup) {
+  plot_data <- prepare_insurance_data(
+    data,
+    c("denominator_person_years", "n_with_group", "prevalence")
+  )
+  plot_data <- plot_data[
+    plot_data$stratification == subgroup &
+      !is.na(plot_data$prevalence) &
+      !is.na(plot_data$denominator_person_years) &
+      plot_data$denominator_person_years >= 11,
+    ,
+    drop = FALSE
+  ]
+  if (nrow(plot_data) == 0L) {
+    return(NULL)
+  }
+
+  plot_data$stratum_value <- factor(
+    plot_data$stratum_value,
+    levels = order_stratum_values(plot_data$stratum_value)
+  )
+  plot_data$ccw_group_label <- unname(ccw_group_labels[plot_data$ccw_group])
+  plot_data$ccw_group_label[
+    is.na(plot_data$ccw_group_label) | plot_data$ccw_group_label == ""
+  ] <- plot_data$ccw_group[
+    is.na(plot_data$ccw_group_label) | plot_data$ccw_group_label == ""
+  ]
+
+  ggplot(
+    plot_data,
+    aes(
+      x = mx_insurance_comparison_group,
+      y = prevalence,
+      fill = stratum_value
+    )
+  ) +
+    geom_col(position = position_dodge2(width = 0.85, preserve = "single"), width = 0.72) +
+    geom_text(
+      aes(label = format_bar_label(prevalence)),
+      position = position_dodge2(width = 0.85, preserve = "single"),
+      vjust = -0.25,
+      size = 2.4
+    ) +
+    facet_wrap(~ ccw_group_label, ncol = 4) +
+    scale_y_continuous(labels = percent_axis_label, expand = expansion(mult = c(0, 0.16))) +
+    scale_x_discrete(labels = function(x) wrap_label(x, width = 12)) +
+    scale_fill_manual(values = fill_palette, drop = FALSE) +
+    labs(
+      title = paste("CCW group prevalence by", subgroup_labels[[subgroup]]),
+      x = NULL,
+      y = "Prevalence",
+      fill = subgroup_labels[[subgroup]]
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(
+      axis.text.x = element_text(size = 8),
+      panel.grid.major.x = element_blank(),
+      legend.position = "bottom"
+    )
+}
+
+print_metric_subgroup_plots <- function(data, metric_label) {
+  for (subgroup in subgroup_order) {
+    cat("\n\n## ", subgroup_labels[[subgroup]], "\n\n", sep = "")
+    plot <- plot_metric_summary(data, metric_label, subgroup)
+    if (is.null(plot)) {
+      cat("No unsuppressed aggregate rows are available for this subgroup.\n\n")
+    } else {
+      print(plot)
+    }
+  }
+}
+
+print_metric_level_subgroup_plots <- function(
+  data,
+  metric_label,
+  level_column,
+  level_order,
+  palette
+) {
+  for (subgroup in subgroup_order) {
+    cat("\n\n## ", subgroup_labels[[subgroup]], "\n\n", sep = "")
+    plot <- plot_metric_level_distribution(
+      data,
+      metric_label,
+      subgroup,
+      level_column,
+      level_order,
+      palette
+    )
+    if (is.null(plot)) {
+      cat("No unsuppressed aggregate rows are available for this subgroup.\n\n")
+    } else {
+      print(plot)
+    }
+  }
+}
+
+print_prevalence_subgroup_plots <- function(data, plot_function) {
+  for (subgroup in subgroup_order) {
+    cat("\n\n## ", subgroup_labels[[subgroup]], "\n\n", sep = "")
+    plot <- plot_function(data, subgroup)
+    if (is.null(plot)) {
+      cat("No unsuppressed aggregate rows are available for this subgroup.\n\n")
+    } else {
+      print(plot)
+    }
+  }
+}
+```
+
+```{r read-data}
+cfi_insurance_subgroups <- read_required_csv(
+  "4.1_cfi_level_by_mx_insurance_subgroup.csv"
+)
+gagne_insurance_subgroups <- read_required_csv(
+  "4.1_gagne_level_by_mx_insurance_subgroup.csv"
+)
+hiv_insurance_subgroups <- read_required_csv(
+  "4.1_hiv_prevalence_by_mx_insurance_subgroup.csv"
+)
+ccw_group_insurance_subgroups <- read_required_csv(
+  "4.1_ccw_group_prevalence_by_mx_insurance_subgroup.csv"
+)
+```
+
+# CFI
+
+```{r cfi-by-insurance-subgroups, results='asis', fig.show='asis', fig.width=13, fig.height=5.2}
+print_metric_level_subgroup_plots(
+  cfi_insurance_subgroups,
+  "CFI",
+  level_column = "frailty_level",
+  level_order = c("Robust (<0.15)", "Prefrail (0.15-<0.25)", "Frail (>=0.25)"),
+  palette = c(
+    "Robust (<0.15)" = cfi_level_palette[["Non-frail"]],
+    "Prefrail (0.15-<0.25)" = cfi_level_palette[["Prefrail"]],
+    "Frail (>=0.25)" = cfi_level_palette[["Frail"]]
+  )
+)
+```
+
+# Gagne
+
+```{r gagne-by-insurance-subgroups, results='asis', fig.show='asis', fig.width=13, fig.height=5.2}
+print_metric_level_subgroup_plots(
+  gagne_insurance_subgroups,
+  "Gagne",
+  level_column = "gagne_level",
+  level_order = c("Gagne <0", "Gagne 0", "Gagne 1-2", "Gagne 3-5", "Gagne 6+"),
+  palette = gagne_level_palette
+)
+```
+
+# HIV
+
+```{r hiv-by-insurance-subgroups, results='asis', fig.show='asis', fig.width=12, fig.height=5.8}
+print_prevalence_subgroup_plots(hiv_insurance_subgroups, plot_hiv_prevalence)
+```
+
+# CCW Groups
+
+```{r ccw-by-insurance-subgroups, results='asis', fig.show='asis', fig.width=13, fig.height=8}
+print_prevalence_subgroup_plots(ccw_group_insurance_subgroups, plot_ccw_group_prevalence)
+```

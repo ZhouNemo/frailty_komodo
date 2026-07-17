@@ -1,0 +1,451 @@
+---
+title: "Polypharmacy by Prescription Insurance Group"
+author: "Nemo Zhou"
+date: "2026-07-15"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+params:
+  analysis_year: 2022
+  polypharmacy_output_dir: null
+---
+
+<!--
+Project: Frailty_Komoto annual polypharmacy insurance-group visualization
+Author: Nemo Zhou
+Date started: 2026-07-10
+Date last updated: 2026-07-16
+
+Purpose:
+This R Markdown report visualizes aggregate annual polypharmacy outputs created
+by Code/2_EDA/5.10_prepare_polypharmacy_insurance_subgroup_inputs.R and
+Code/2_EDA/5.8_describe_annual_polypharmacy_atc3_prevalence.R. It does not connect to
+Redshift. It reads aggregate CSV files from the project-root Outputs folder and
+renders polypharmacy prevalence bars by age group, sex, and race/ethnicity
+within each prescription insurance comparison group. It also renders top 10 ATC3
+class prevalence across four prescription insurance comparison groups:
+Commercial, Medicaid, Medicare Advantage, and Medicare FFS.
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 11,
+  fig.height = 6
+)
+
+library(ggplot2)
+```
+
+```{r helpers}
+selected_analysis_year <- as.integer(params$analysis_year)
+if (
+  length(selected_analysis_year) != 1L ||
+    is.na(selected_analysis_year) ||
+    selected_analysis_year < 2016L ||
+    selected_analysis_year > 2025L
+) {
+  stop("Set params$analysis_year to one integer year from 2016 through 2025.")
+}
+
+if (!is.null(params$polypharmacy_output_dir) && nzchar(params$polypharmacy_output_dir)) {
+  output_dir <- params$polypharmacy_output_dir
+} else {
+  year_output_subdir <- paste0("5.x_annual_polypharmacy_", selected_analysis_year)
+  output_dir_candidates <- c(
+    file.path("Outputs", year_output_subdir),
+    file.path("../Outputs", year_output_subdir),
+    file.path("../../Outputs", year_output_subdir),
+    "Outputs",
+    "../Outputs",
+    "../../Outputs"
+  )
+  output_dir <- output_dir_candidates[dir.exists(output_dir_candidates)][1]
+}
+
+if (is.null(output_dir) || is.na(output_dir) || !dir.exists(output_dir)) {
+  stop(
+    "Could not find the polypharmacy output directory. Run Code/2_EDA/5.10_prepare ",
+    "and Code/2_EDA/5.8 first."
+  )
+}
+
+read_required_csv <- function(file_name) {
+  path <- file.path(output_dir, file_name)
+  if (!file.exists(path)) {
+    stop(
+      "Missing required file: ",
+      path,
+      ". Run Code/2_EDA/5.10_prepare_polypharmacy_insurance_subgroup_inputs.R ",
+      "and Code/2_EDA/5.8 first."
+    )
+  }
+
+  utils::read.csv(path, stringsAsFactors = FALSE, check.names = FALSE)
+}
+
+filter_to_analysis_year <- function(data, data_name) {
+  if (!"analysis_year" %in% names(data)) {
+    stop(data_name, " must contain an analysis_year column.")
+  }
+
+  data$analysis_year <- as.integer(data$analysis_year)
+  filtered <- data[data$analysis_year == selected_analysis_year, , drop = FALSE]
+
+  if (nrow(filtered) == 0L) {
+    available_years <- sort(unique(data$analysis_year[!is.na(data$analysis_year)]))
+    stop(
+      data_name,
+      " does not contain analysis_year = ",
+      selected_analysis_year,
+      ". Available years: ",
+      paste(available_years, collapse = ", "),
+      ". Run Code/2_EDA/5.10_prepare_polypharmacy_insurance_subgroup_inputs.R ",
+      "and Code/2_EDA/5.8_describe_annual_polypharmacy_atc3_prevalence.R for the selected year first."
+    )
+  }
+
+  filtered
+}
+
+comma_label <- function(x) {
+  format(round(as.numeric(x)), big.mark = ",", scientific = FALSE, trim = TRUE)
+}
+
+percent_axis_label <- function(x) {
+  paste0(sprintf("%.0f", 100 * as.numeric(x)), "%")
+}
+
+percent_label_from_pct <- function(x) {
+  paste0(sprintf("%.1f", as.numeric(x)), "%")
+}
+
+wrap_label <- function(x, width = 18) {
+  vapply(
+    as.character(x),
+    function(value) paste(strwrap(value, width = width), collapse = "\n"),
+    character(1)
+  )
+}
+
+insurance_order <- c(
+  "Commercial",
+  "Medicaid",
+  "Medicare Advantage",
+  "Medicare FFS"
+)
+
+insurance_palette <- c(
+  "Commercial" = "#2E86AB",
+  "Medicaid" = "#7D5BA6",
+  "Medicare Advantage" = "#3F7C85",
+  "Medicare FFS" = "#A44A3F"
+)
+
+subgroup_labels <- c(
+  age_group = "Age group",
+  sex = "Sex",
+  race_ethnicity = "Race/ethnicity"
+)
+
+subgroup_order <- c("age_group", "sex", "race_ethnicity")
+
+map_rx_insurance_group <- function(group, segment) {
+  group_clean <- toupper(trimws(as.character(group)))
+  segment_clean <- toupper(trimws(as.character(segment)))
+
+  mapped <- rep(NA_character_, length(group_clean))
+  mapped[group_clean == "COMMERCIAL"] <- "Commercial"
+  mapped[group_clean == "MEDICAID"] <- "Medicaid"
+  mapped[
+    group_clean == "MEDICARE" &
+      (
+        grepl("ADVANTAGE|\\bADV\\b", segment_clean) |
+          segment_clean %in% c("MA", "MAPD")
+      )
+  ] <- "Medicare Advantage"
+  mapped[
+    group_clean == "MEDICARE" &
+      (
+        grepl("FFS|FEE|TRADITIONAL", segment_clean) |
+          segment_clean %in% c("PDP")
+      )
+  ] <- "Medicare FFS"
+
+  mapped
+}
+
+aggregate_sum <- function(data, key_columns, value_column, output_column) {
+  aggregate(
+    data[[value_column]],
+    data[key_columns],
+    sum,
+    na.rm = TRUE
+  ) |>
+    setNames(c(key_columns, output_column))
+}
+
+order_stratum_values <- function(values) {
+  values <- unique(as.character(values))
+  age_order <- c("40-49", "50-64", "65-74", "75-84", "85+", "Unknown")
+  sex_order <- c("F", "M", "Unknown")
+  if (all(values %in% age_order)) {
+    return(age_order[age_order %in% values])
+  }
+  if (all(values %in% sex_order)) {
+    return(sex_order[sex_order %in% values])
+  }
+  sort(values)
+}
+
+prepare_polypharmacy_subgroup_levels <- function(data) {
+  numeric_columns <- c(
+    "analysis_year",
+    "subgroup_denominator",
+    "n_patients",
+    "percent_within_subgroup"
+  )
+  data[numeric_columns] <- lapply(data[numeric_columns], as.numeric)
+  data$rx_insurance_comparison_group <- factor(
+    data$rx_insurance_comparison_group,
+    levels = insurance_order
+  )
+  data <- data[
+    !is.na(data$rx_insurance_comparison_group) &
+      !is.na(data$percent_within_subgroup),
+    ,
+    drop = FALSE
+  ]
+
+  data
+}
+
+prepare_top_atc3_by_insurance <- function(data, top_n = 10L) {
+  numeric_columns <- c(
+    "analysis_year",
+    "n_patient_years_with_atc3",
+    "n_eligible_patient_years"
+  )
+  data[numeric_columns] <- lapply(data[numeric_columns], as.numeric)
+  data$insurance_group <- map_rx_insurance_group(
+    data$rx_insurance_group,
+    data$rx_insurance_segment
+  )
+  data <- data[
+    !is.na(data$insurance_group) &
+      !is.na(data$n_patient_years_with_atc3) &
+      !is.na(data$n_eligible_patient_years),
+    ,
+    drop = FALSE
+  ]
+
+  key_columns <- c("analysis_year", "insurance_group", "atc3", "atc3_label")
+  numerators <- aggregate_sum(
+    data,
+    key_columns,
+    "n_patient_years_with_atc3",
+    "n_patient_years_with_atc3"
+  )
+  denominators <- aggregate_sum(
+    data,
+    key_columns,
+    "n_eligible_patient_years",
+    "n_eligible_patient_years"
+  )
+  aggregated <- merge(
+    numerators,
+    denominators,
+    by = key_columns,
+    all = TRUE
+  )
+  aggregated$prevalence_pct <- ifelse(
+    aggregated$n_eligible_patient_years > 0,
+    100 * aggregated$n_patient_years_with_atc3 / aggregated$n_eligible_patient_years,
+    NA_real_
+  )
+
+  top_rows <- aggregate(
+    aggregated$n_patient_years_with_atc3,
+    aggregated[c("analysis_year", "atc3", "atc3_label")],
+    sum,
+    na.rm = TRUE
+  )
+  names(top_rows)[names(top_rows) == "x"] <- "overall_n_patient_years_with_atc3"
+  top_rows <- top_rows[order(
+    top_rows$analysis_year,
+    -top_rows$overall_n_patient_years_with_atc3,
+    top_rows$atc3
+  ), , drop = FALSE]
+
+  selected_rows <- list()
+  for (analysis_year in unique(top_rows$analysis_year)) {
+    year_rows <- top_rows[top_rows$analysis_year == analysis_year, , drop = FALSE]
+    selected_rows[[as.character(analysis_year)]] <- utils::head(year_rows, top_n)
+  }
+  selected_top <- do.call(rbind, selected_rows)
+
+  plot_data <- merge(
+    aggregated,
+    selected_top[c("analysis_year", "atc3")],
+    by = c("analysis_year", "atc3"),
+    all = FALSE
+  )
+  plot_data$insurance_group <- factor(
+    plot_data$insurance_group,
+    levels = insurance_order
+  )
+  plot_data$atc3_plot_label <- paste0(plot_data$atc3, " - ", plot_data$atc3_label)
+  label_order <- selected_top$atc3[order(
+    selected_top$analysis_year,
+    selected_top$overall_n_patient_years_with_atc3
+  )]
+  label_order <- unique(label_order)
+  atc3_label_lookup <- unique(plot_data[, c("atc3", "atc3_plot_label"), drop = FALSE])
+  plot_data$atc3_plot_label <- factor(
+    plot_data$atc3_plot_label,
+    levels = atc3_label_lookup$atc3_plot_label[
+      match(label_order, atc3_label_lookup$atc3)
+    ]
+  )
+
+  plot_data
+}
+
+plot_polypharmacy_subgroup_levels <- function(data, subgroup) {
+  plot_data <- data[
+    data$stratification == subgroup &
+      data$polypharmacy_group == "With polypharmacy" &
+      !is.na(data$subgroup_denominator) &
+      data$subgroup_denominator >= 11,
+    ,
+    drop = FALSE
+  ]
+  if (nrow(plot_data) == 0L) {
+    return(NULL)
+  }
+  plot_data$stratum_value <- factor(
+    plot_data$stratum_value,
+    levels = order_stratum_values(plot_data$stratum_value)
+  )
+  plot_data$plot_label <- sprintf(
+    "%.1f%%",
+    100 * plot_data$percent_within_subgroup
+  )
+
+  ggplot(
+    plot_data,
+    aes(
+      x = stratum_value,
+      y = percent_within_subgroup,
+      fill = rx_insurance_comparison_group
+    )
+  ) +
+    geom_col(width = 0.65, color = "white", linewidth = 0.2) +
+    geom_text(
+      aes(label = plot_label),
+      vjust = -0.25,
+      color = "#1f2933",
+      size = 2.8
+    ) +
+    facet_wrap(~ rx_insurance_comparison_group, nrow = 1) +
+    scale_y_continuous(
+      labels = percent_axis_label,
+      expand = expansion(mult = c(0, 0.14))
+    ) +
+    scale_x_discrete(labels = function(x) wrap_label(x, width = 14)) +
+    scale_fill_manual(values = insurance_palette, drop = FALSE) +
+    labs(
+      title = paste("Polypharmacy prevalence by", subgroup_labels[[subgroup]]),
+      x = NULL,
+      y = "Polypharmacy prevalence",
+      fill = NULL
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      axis.text.x = element_text(size = 9, angle = 45, hjust = 1),
+      panel.grid.major.x = element_blank(),
+      legend.position = "none"
+    )
+}
+
+print_polypharmacy_subgroup_plots <- function(data) {
+  for (subgroup in subgroup_order) {
+    cat("\n\n## ", subgroup_labels[[subgroup]], "\n\n", sep = "")
+    plot <- plot_polypharmacy_subgroup_levels(data, subgroup)
+    if (is.null(plot)) {
+      cat("No unsuppressed aggregate rows are available for this subgroup.\n\n")
+    } else {
+      print(plot)
+    }
+  }
+}
+
+plot_top_atc3_prevalence <- function(data) {
+  data <- data[!is.na(data$prevalence_pct), , drop = FALSE]
+
+  ggplot(
+    data,
+    aes(
+      x = atc3_plot_label,
+      y = prevalence_pct,
+      fill = insurance_group
+    )
+  ) +
+    geom_col(width = 0.65) +
+    coord_flip() +
+    facet_grid(analysis_year ~ insurance_group) +
+    scale_y_continuous(labels = function(x) paste0(x, "%")) +
+    scale_fill_manual(values = insurance_palette, drop = FALSE) +
+    labs(
+      title = "Top 10 ATC3 class prevalence by prescription insurance group",
+      x = NULL,
+      y = "Prevalence",
+      fill = NULL
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(
+      legend.position = "none",
+      panel.grid.major.y = element_blank(),
+      strip.text = element_text(face = "bold")
+    )
+}
+```
+
+```{r read-data}
+polypharmacy_by_rx_insurance_subgroup <- read_required_csv(
+  "5.6_polypharmacy_level_by_rx_insurance_subgroup.csv"
+)
+atc3_by_rx_insurance <- read_required_csv(
+  "5.8_annual_polypharmacy_atc3_prevalence_by_rx_insurance.csv"
+)
+
+polypharmacy_by_rx_insurance_subgroup <- filter_to_analysis_year(
+  polypharmacy_by_rx_insurance_subgroup,
+  "5.6_polypharmacy_level_by_rx_insurance_subgroup.csv"
+)
+atc3_by_rx_insurance <- filter_to_analysis_year(
+  atc3_by_rx_insurance,
+  "5.8_annual_polypharmacy_atc3_prevalence_by_rx_insurance.csv"
+)
+
+polypharmacy_subgroup_levels <- prepare_polypharmacy_subgroup_levels(
+  polypharmacy_by_rx_insurance_subgroup
+)
+top_atc3_by_insurance <- prepare_top_atc3_by_insurance(atc3_by_rx_insurance)
+```
+
+# Polypharmacy Prevalence
+
+```{r polypharmacy-prevalence-bars, results='asis', fig.show='asis', fig.width=13, fig.height=5.2}
+print_polypharmacy_subgroup_plots(polypharmacy_subgroup_levels)
+```
+
+# Top 10 ATC3 Class Prevalence
+
+```{r top-atc3-by-insurance, fig.width=14, fig.height=7}
+plot_top_atc3_prevalence(top_atc3_by_insurance)
+```

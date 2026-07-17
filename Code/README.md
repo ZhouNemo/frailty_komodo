@@ -3,7 +3,7 @@
 Project: Frailty_Komoto
 Author: Nemo Zhou
 Date started: 2026-06-16
-Date last updated: 2026-07-04
+Date last updated: 2026-07-16
 
 This folder contains the R and helper scripts used to connect to Komodo,
 diagnose source tables, build annual eligibility cohorts, generate aggregate
@@ -23,14 +23,32 @@ komodo_ext.normalized_procedure_events
 It does not stage raw inpatient/non-inpatient events, flatten arrays, apply
 candidate event prefilters, or apply the older first-25-array-elements cap.
 
+## Folder Layout
+
+- `Code/0_test`: all `0.xx` connection, diagnostic, source-validation, and
+  lookup-conversion scripts.
+- `Code/1_eligbility`: all `1.xx` annual eligibility, cohort QA, and
+  eligibility-restriction scripts.
+- `Code/2_variable construction`: the active `3.x` normalized clinical-metric
+  build and `5.0` through `5.7` polypharmacy construction pipeline.
+- `Code/2_EDA`: the `2.x` Table 1 scripts, `4.x` descriptive analysis scripts,
+  and `5.8` through `5.10` polypharmacy reporting scripts.
+
+The numeric prefixes remain unchanged so existing output names and workflow
+references remain recognizable. Run scripts from the repository root because
+the active workflows use project-relative `Documents` and `Outputs` paths.
+The `5.10_prepare_polypharmacy_insurance_subgroup_inputs.R` script is kept in
+`Code/2_EDA` because it prepares report inputs rather than constructing the
+underlying polypharmacy metric.
+
+`Code/Old` remains the historical archive and is not part of this active folder
+layout.
+
 ## Numeric Order
 
-- `0.xx`: connection, diagnostics, source validation, and lookup conversion.
-- `1.xx`: annual eligible cohort construction and cohort QA.
-- `2.xx`: aggregate Table 1 and subgroup summary scripts.
-- `3.xx`: active normalized annual clinical-metrics build pipeline.
-- `4.xx`: descriptive analyses using completed annual analysis tables.
-- `5.xx`: active annual polypharmacy build pipeline.
+Within the semantic folders, follow the numeric workflow order: `0_test`,
+`1_eligbility`, `2_variable construction` for the metric pipelines, and
+`2_EDA` for aggregate analysis and reporting.
 - `Code/Old`: historical scripts that are no longer part of the active workflow,
   retained for provenance or scoring-engine reuse. `Documents/Old` and
   `Outputs/Old` follow the same convention for historical documents and outputs.
@@ -107,6 +125,17 @@ outputs under `Outputs`.
 Run this when checking available KRD table names, including normalized source
 tables.
 
+## `0.8_repair_polypharmacy_fill_duplicates.R`
+
+Targeted maintenance script for the annual polypharmacy pipeline. It repairs
+selected-year duplicate event keys in `2_polypharmacy_pharmacy_fills` without
+rescanning `komodo_ext.pharmacy_events`, but only when duplicate rows agree on
+the analytic exposure fields `fill_date`, `ndc11`, and `days_supply`. It prints
+aggregate duplicate summaries and keeps patient-level rows inside Redshift.
+
+Run this only after `5.6_check_annual_polypharmacy_metrics.R` reports duplicate
+rows in `2_polypharmacy_pharmacy_fills`; then rerun `5.6`.
+
 ## `1.1_build_annual_eligible_population.R`
 
 Production script for building the `1_annual_eligible_cohort` patient-year
@@ -135,6 +164,117 @@ race-enhanced cohort back to `1_annual_eligible_cohort`.
 
 Run this after `1.1` and `1.2` when race/ethnicity-stratified summaries or
 clinical metrics are needed.
+
+## `1.4_filter_clinical_metrics_to_non_inpatient_claim_eligible.R`
+
+Upstream eligibility-restriction script for the annual clinical-metrics and
+polypharmacy denominator. It reads `1_annual_eligible_cohort`, keeps
+patient-years with at least one row in `komodo_ext.non_inpatient_events` during
+the same calendar analysis year, and writes:
+
+```text
+1_annual_eligible_cohort_non_inpatient_claim_eligible
+```
+
+This script intentionally runs before `3.1_prepare_annual_metric_ids.R` when
+the non-inpatient claim criterion is part of the analytic denominator. It does
+not mutate the unrestricted `1_annual_eligible_cohort`; instead, it creates or
+refreshes the selected-year slice of the restricted upstream eligibility table.
+To use the restricted table in `3.x` and `5.x`, set
+`eligibility_table = "1_annual_eligible_cohort_non_inpatient_claim_eligible"`
+in `frailty.normalized_clinical_metrics.config` before running `3.13`.
+
+Run this after `1.1`, `1.2`, and `1.3`, and before `3.1` or `3.13`.
+
+## `1.5_join_patient_geography_to_clinical_metrics.R`
+
+Upstream geography-attribution script for the restricted annual eligibility
+table. It reads `1_annual_eligible_cohort_non_inpatient_claim_eligible`, joins
+to `komodo_ext.patient_geography`, and selects the `patient_zip` where the
+patient spent the most clipped days in the calendar analysis year based on
+`valid_from_date` and `valid_to_date`. It also carries `patient_state`,
+`geography_days_in_year`, and the clipped geography date span used for the
+selected ZIP. The default run is 2016, and additional years can be supplied with
+the `frailty.patient_geography_join.config` option. It updates this table in
+place:
+
+```text
+1_annual_eligible_cohort_non_inpatient_claim_eligible
+```
+
+This script intentionally runs after `1.4` and before `3.1` or `3.13`.
+Patient-years without a nonmissing ZIP in `PATIENT_GEOGRAPHY` remain in the
+output with missing geography fields. `3.1` carries these optional geography
+columns into `2_annual_metric_ids`, and the final clinical-metrics table keeps
+them through the standard final-table builder.
+
+Run this after `1.4_filter_clinical_metrics_to_non_inpatient_claim_eligible.R`.
+
+## `1.6_run_annual_metrics_for_all_years.R`
+
+All-year convenience runner for the current annual clinical metrics and
+polypharmacy workflow. By default, it loops over 2016-2025 and, for each year,
+runs the non-inpatient eligibility restriction, annual geography join,
+normalized clinical metrics build, clinical-metrics descriptive reports,
+polypharmacy build, the lightweight `5.10` subgroup CSV prep, and the
+prescription-insurance polypharmacy report render.
+
+The base lookup and unrestricted eligibility setup scripts are not run by
+default. Set `run_base_setup <- TRUE` at the top only when these are not already
+current:
+
+```text
+0.6_validate_clinical_metric_lookups.R
+1.1_build_annual_eligible_population.R
+1.2_check_annual_eligible_population.R
+1.3_join_race_ethnicity_to_eligible_cohort.R
+```
+
+To run a subset from the command line, pass a comma-separated list or range,
+such as `2022` or `2016:2025`. From an interactive R session, edit
+`analysis_years <- 2016:2025` at the top or set `FRAILTY_ANALYSIS_YEARS`.
+If `5.7_run_annual_polypharmacy.R` stops because a selected-year
+NDC11-to-ATC crosswalk is missing, run the printed PowerShell n2c command and
+rerun this `1.6` script.
+
+## `1.7_filter_clinical_metrics_to_alive_at_year_end.R`
+
+Later-added post-final-table eligibility restriction for year-specific clinical
+metrics analyses. It reads `6_annual_clinical_metrics_shared`, checks
+`komodo_ext.patient_mortality`, and keeps patient-years with no recorded death
+on or before December 31 of the analysis year. Because the KRD death date is
+month-truncated, a death date of `2022-12-01` excludes that patient from the
+2022 analysis.
+
+The default selected year is 2022. It writes:
+
+```text
+6_annual_clinical_metrics_shared_alive_at_year_end
+```
+
+This script does not rebuild the annual denominator or recalculate metric
+values. Run it after `3.11_build_normalized_annual_clinical_metrics.R` and
+`3.12_check_normalized_annual_clinical_metrics.R`, before using the restricted
+table for year-end-survivor analyses. Configure selected years or a different
+source table with the `frailty.alive_at_year_end_filter.config` option.
+
+## `1.8_filter_clinical_metrics_to_2022.R`
+
+Fixed-project-year analysis-preparation filter. It reads the completed
+`6_annual_clinical_metrics_shared_alive_at_year_end` table and writes only rows
+with `analysis_year = 2022` to:
+
+```text
+6_annual_clinical_metrics_shared_2022
+```
+
+The output table is fully refreshed on each run and is checked for non-2022
+rows and duplicate patient-years. It does not rebuild the annual denominator or
+recalculate metric values. Run it after
+`1.7_filter_clinical_metrics_to_alive_at_year_end.R`. The default analysis year
+is fixed to 2022; configuration is available through
+`frailty.clinical_metrics_2022_filter.config` for source and schema names, but
+another analysis year is rejected.
 
 ## `2.1_generate_2016_table1.R`
 
@@ -212,12 +352,16 @@ use static full-year event bounds to keep external scans pushdown-prunable.
 ## `3.1_prepare_annual_metric_ids.R`
 
 Normalized denominator preparation script. It creates or refreshes selected
-years in `2_annual_metric_ids` from `1_annual_eligible_cohort`, preserving
-patient-year dates, demographics, race/ethnicity when available, and annual
-insurance fields. `patient_id` is retained for normalized event joins and
-`patid` is retained as the downstream patient-year key.
+years in `2_annual_metric_ids` from the configured eligibility table,
+preserving patient-year dates, demographics, race/ethnicity when available,
+annual insurance fields, and optional upstream geography fields from `1.5`.
+`patient_id` is retained for normalized event joins and `patid` is retained as
+the downstream patient-year key.
 
-Run this after `0.6`, `1.1`, `1.2`, and `1.3`.
+Run this after `0.6`, `1.1`, `1.2`, and `1.3`. If the analytic denominator
+requires same-year non-inpatient claims or geography attribution, run `1.4` and
+`1.5` first and point `eligibility_table` at the restricted upstream eligibility
+table.
 
 ## `3.4_prepare_annual_code_presence.R`
 
@@ -399,9 +543,12 @@ Outputs/4.1_annual_clinical_metrics_descriptive
 The script produces CFI and Gagne overall summaries, histograms, and
 aggregate-statistic box plots by age group, sex, primary medical insurance,
 medical insurance segment, and race/ethnicity, with one combined subgroup
-box-plot figure per metric. It also produces CCW condition and group prevalence
-tables, CCW burden by age/sex/payer/race, HIV-stratified CCW burden by
-age/sex/payer, and categorical/continuous Table 1 summaries by CFI frailty
+box-plot figure per metric. It also writes medical-insurance comparison CSVs
+for CFI frailty level, Gagne score level, HIV-positive prevalence, and CCW group
+prevalence by age group, sex, and race/ethnicity, with Medicare split into
+Medicare Advantage and Medicare FFS. It also produces CCW condition and group
+prevalence tables, CCW burden by age/sex/payer/race, HIV-stratified CCW burden
+by age/sex/payer, and categorical/continuous Table 1 summaries by CFI frailty
 level. It also writes long categorical Table 1 source files by CFI frailty
 level, Gagne score level, and HIV status for the R Markdown report to format
 with group denominators in headers and percentages in cells. Gagne Table 1
@@ -457,10 +604,33 @@ Outputs/4.1_annual_clinical_metrics_descriptive_2025
 ```
 
 By default it also renders
-`Code/4.2_visualize_annual_clinical_metrics_descriptive_outputs.Rmd` to a
-year-specific HTML file in that same folder, so a 2025 run does not overwrite
-2016 descriptive outputs. Edit `analysis_year <- 2025L` at the top of the file
-or pass a year as the first command-line argument.
+`Code/2_EDA/4.2_visualize_annual_clinical_metrics_descriptive_outputs.Rmd` and
+`Code/2_EDA/4.5_visualize_clinical_metrics_by_mx_insurance.Rmd` to year-specific HTML
+files in that same folder, so a 2025 run does not overwrite 2016 descriptive
+outputs. Edit `analysis_year <- 2025L` at the top of the file or pass a year as
+the first command-line argument.
+
+## `4.5_visualize_clinical_metrics_by_mx_insurance.Rmd`
+
+CSV-only R Markdown report for comparing CFI, Gagne combined comorbidity score,
+HIV-positive prevalence, and CCW group prevalence across primary medical
+insurance comparison groups. The report reads aggregate CSVs created by
+`4.1_describe_annual_clinical_metrics.R`, does not reconnect to Redshift, and
+does not render Table 1 output. Medicare is split into Medicare Advantage and
+Medicare FFS using `mx_insurance_segment`, while Commercial and Medicaid remain
+group-level categories.
+
+For CFI and Gagne, each age/sex/race subsection shows stacked categorical-level
+bar plots for the four medical insurance comparison groups on one row. For HIV
+and CCW groups, each age/sex/race subsection uses medical insurance group on
+the x-axis with subgroup levels as bar fills. Bar values are labeled directly,
+and CCW group facets use full group names rather than abbreviations.
+
+Run this through `4.4_run_annual_clinical_metrics_descriptive_analysis.R` so the
+medical-insurance comparison CSVs are created before rendering. Use the
+`descriptive_output_dir` parameter only when rendering this report manually
+against a year-specific output folder such as
+`Outputs/4.1_annual_clinical_metrics_descriptive_2025`.
 
 ## `5.0_annual_polypharmacy_helpers.R`
 
@@ -477,9 +647,10 @@ options("frailty.annual_polypharmacy.config" = list(...))
 ```
 
 The default configuration processes 2016 only, reuses `2_annual_metric_ids` as
-the patient-year denominator, does not apply `PATIENT_CLOSED` or `RX CLOSED`
-coverage filters, and expects a reviewed transaction-status decision before
-`5.1` extracts pharmacy fills. Configure one or more of
+the patient-year denominator, writes local artifacts under
+`Outputs/5.x_annual_polypharmacy_<years>`, does not apply `PATIENT_CLOSED` or
+`RX CLOSED` coverage filters, and expects a reviewed transaction-status decision
+before `5.1` extracts pharmacy fills. Configure one or more of
 `transaction_result_keep`, `transaction_status_keep`, or
 `transaction_source_type_keep` after reviewing aggregate transaction values.
 For an exploratory unfiltered run only, set
@@ -487,7 +658,7 @@ For an exploratory unfiltered run only, set
 is expected at:
 
 ```text
-Outputs/5.3_polypharmacy_ndc11_atc_crosswalk.csv
+Outputs/5.x_annual_polypharmacy_<years>/5.3_polypharmacy_ndc11_atc_crosswalk_<years>.csv
 ```
 
 ## `5.1_prepare_polypharmacy_pharmacy_fills.R`
@@ -498,8 +669,10 @@ confirmed pharmacy schema fields, keeps character 11-digit NDC11 values,
 requires positive days supply, and applies reviewed transaction filters from
 the `frailty.annual_polypharmacy.config` option. It stops unless a reviewed
 filter is configured or `allow_unfiltered_transactions = TRUE` is set for an
-exploratory run. It writes durable pre/post extraction QA for excluded fills,
-days-supply buckets, and transaction values. It writes:
+exploratory run. Before persistence, it deterministically collapses duplicate
+patient-year event keys so the cleaned fills table keeps one row per event key.
+It writes durable pre/post extraction QA for excluded fills, days-supply
+buckets, and transaction values. It writes:
 
 ```text
 2_polypharmacy_pharmacy_fills
@@ -516,13 +689,13 @@ codes only, not patient-level rows. It writes:
 
 ```text
 2_polypharmacy_unique_ndc11
-Outputs/5.2_polypharmacy_unique_ndc11_<years>.txt
+Outputs/5.x_annual_polypharmacy_<years>/5.2_polypharmacy_unique_ndc11_<years>.txt
 ```
 
 Run this after `5.1_prepare_polypharmacy_pharmacy_fills.R`, then map the text
 file with n2c before staging the crosswalk.
 
-## `5.25_download_and_run_polypharmacy_n2c_mapping.ps1`
+## `5.2.5_download_and_run_polypharmacy_n2c_mapping.ps1`
 
 PowerShell helper for the one-time external n2c/RxNav mapping step between
 `5.2` and `5.3`. It downloads n2c into the project root if needed, creates a
@@ -531,7 +704,7 @@ Python dependencies, runs ATC4 mapping on the exported unique NDC11 text file,
 and copies the completed n2c CSV to:
 
 ```text
-Outputs/5.3_polypharmacy_ndc11_atc_crosswalk.csv
+Outputs/5.x_annual_polypharmacy_<years>/5.3_polypharmacy_ndc11_atc_crosswalk_<years>.csv
 ```
 
 This script only needs to be run once per exported unique-NDC list and mapping
@@ -596,42 +769,51 @@ from `2_polypharmacy_fill_extraction_qa`, transaction-value counts before and
 after filtering, days-supply buckets before and after exclusions, NDC mapping
 coverage by unique NDC11 and fill row, multiple ATC4/ATC3 mappings,
 exposure-episode validity, final-table completeness, duplicate keys, and
-prescription-insurance prevalence summaries. Counts below 11 in the insurance
-prevalence section are suppressed before CSV export. It writes:
+prescription-insurance prevalence summaries. If duplicate cleaned fill event
+keys are present, it also reports an aggregate duplicate-key summary before
+stopping. It also writes polypharmacy-level summaries by age group, sex, and
+race/ethnicity within the four prescription insurance comparison groups:
+Commercial, Medicaid, Medicare Advantage, and Medicare FFS. Counts below 11 in
+the insurance prevalence and subgroup sections are suppressed before CSV
+export. It writes:
 
 ```text
-Outputs/5.6_annual_polypharmacy_metrics_qa.csv
-Outputs/5.6_annual_polypharmacy_summary.csv
-Outputs/5.6_annual_polypharmacy_prevalence_by_rx_insurance.csv
-Outputs/5.6_table_one_by_polypharmacy_categorical.csv
-Outputs/5.6_distinct_atc3_distribution.csv
+Outputs/5.x_annual_polypharmacy_<years>/5.6_annual_polypharmacy_metrics_qa.csv
+Outputs/5.x_annual_polypharmacy_<years>/5.6_annual_polypharmacy_summary.csv
+Outputs/5.x_annual_polypharmacy_<years>/5.6_annual_polypharmacy_prevalence_by_rx_insurance.csv
+Outputs/5.x_annual_polypharmacy_<years>/5.6_polypharmacy_level_by_rx_insurance_subgroup.csv
+Outputs/5.x_annual_polypharmacy_<years>/5.6_table_one_by_polypharmacy_categorical.csv
+Outputs/5.x_annual_polypharmacy_<years>/5.6_distinct_atc3_distribution.csv
 ```
 
 Run this after `5.5_calculate_annual_polypharmacy_metrics.R`.
 
 ## `5.7_run_annual_polypharmacy.R`
 
-Standard annual runner for the `5.x` annual polypharmacy flow. Edit the
-`analysis_year` value in the annual run settings block at the top of the file,
-then source the runner from R. The runner sets the reviewed transaction filter
+Standard annual runner for the `5.x` annual polypharmacy flow. Set the
+`analysis_year` value in the annual run settings block, pass the year as the
+first command-line argument, or set `FRAILTY_ANALYSIS_YEAR` before sourcing the
+runner from R. The runner sets the reviewed transaction filter
 `transaction_result_keep = c("PAID")`, uses a year-specific
 `mapping_version_date`, writes the selected-year unique NDC11 export, and uses a
 year-specific crosswalk path:
 
 ```text
-Outputs/5.3_polypharmacy_ndc11_atc_crosswalk_<year>.csv
+Outputs/5.x_annual_polypharmacy_<year>/5.3_polypharmacy_ndc11_atc_crosswalk_<year>.csv
 ```
 
 If the selected-year crosswalk is missing, the runner sources `5.1` and `5.2`,
 then stops with the exact PowerShell command needed to run the external n2c/RxNav
 mapping step. After that command completes, source `5.7` again; it will continue
-with `5.3`, `5.4`, `5.5`, `5.6`, and `5.8`. The runner restores any prior
+with `5.3`, `5.4`, `5.5`, `5.6`, `5.8`, `5.10`, and render the `5.9` and `5.10`
+HTML reports into the same year-specific folder. The runner restores any prior
 `frailty.annual_polypharmacy.config` option on exit.
 
 Durable Redshift tables are refreshed only for the selected `analysis_year`;
-local report-ready CSVs in `Outputs` reflect the latest selected run. The
-`PAID`-only decision and its supporting 2016 transaction-value counts are
-documented in `Documents/12_POLYPHARMACY_DATA_PROCESSING_FLOW.md`.
+local report-ready files are written under
+`Outputs/5.x_annual_polypharmacy_<year>`. The `PAID`-only decision and its
+supporting 2016 transaction-value counts are documented in
+`Documents/12_POLYPHARMACY_DATA_PROCESSING_FLOW.md`.
 
 ## `5.8_describe_annual_polypharmacy_atc3_prevalence.R`
 
@@ -644,25 +826,66 @@ stratified prevalence summaries. Small cells are suppressed before CSV export.
 It writes:
 
 ```text
-Outputs/5.8_annual_polypharmacy_atc3_prevalence.csv
-Outputs/5.8_annual_polypharmacy_atc3_prevalence_by_rx_insurance.csv
+Outputs/5.x_annual_polypharmacy_<years>/5.8_annual_polypharmacy_atc3_prevalence.csv
+Outputs/5.x_annual_polypharmacy_<years>/5.8_annual_polypharmacy_atc3_prevalence_by_rx_insurance.csv
 ```
 
 Run this after `5.4_build_annual_polypharmacy_exposures.R`. It can be run
 before or after `5.5` because it does not depend on
-`6_annual_polypharmacy_metrics`.
+`6_annual_polypharmacy_metrics`. When sourced by
+`5.7_run_annual_polypharmacy.R`, it honors the runner's selected
+`frailty.annual_polypharmacy.config` year. When run directly, it also honors
+`FRAILTY_ANALYSIS_YEAR` before falling back to 2016.
 
 ## `5.9_visualize_annual_polypharmacy_outputs.Rmd`
 
 CSV-only R Markdown report for annual polypharmacy outputs. It reads the
-report-ready CSVs written by `5.6` and `5.8` from the project-root `Outputs`
-folder and renders annual polypharmacy summaries, a Table 1 by polypharmacy
-status, a distinct ATC3 medication-class count histogram, a
+report-ready CSVs written by `5.6` and `5.8` from the year-specific
+`Outputs/5.x_annual_polypharmacy_<year>` folder and renders annual polypharmacy
+summaries, a Table 1 by polypharmacy status, a distinct ATC3 medication-class
+count histogram, a
 prescription-insurance prevalence plot, and a top-20 ATC3 class prevalence plot.
 It does not connect to Redshift.
 
 Run this after `5.6_check_annual_polypharmacy_metrics.R` and
-`5.8_describe_annual_polypharmacy_atc3_prevalence.R`.
+`5.8_describe_annual_polypharmacy_atc3_prevalence.R`. When knitting directly
+from RStudio, set the YAML `analysis_year` parameter; the report will look first
+in `Outputs/5.x_annual_polypharmacy_<year>` unless `polypharmacy_output_dir` is
+provided.
+
+## `5.10_prepare_polypharmacy_insurance_subgroup_inputs.R`
+
+Lightweight CSV-preparation script for the insurance-subgroup polypharmacy
+report. It reads only `2_annual_metric_ids` and `6_annual_polypharmacy_metrics`
+for the selected year, then writes:
+
+```text
+Outputs/5.x_annual_polypharmacy_<years>/5.6_polypharmacy_level_by_rx_insurance_subgroup.csv
+```
+
+Use this when the completed polypharmacy tables already exist and you only need
+to refresh the `5.10` subgroup plot input. It avoids the broad `5.6` QA workflow
+and does not rescan pharmacy fills, NDC mapping coverage, or exposure episodes.
+
+## `5.10_visualize_polypharmacy_by_insurance_groups.Rmd`
+
+CSV-only R Markdown report for prescription-insurance comparison views of
+annual polypharmacy outputs. It reads
+`Outputs/5.x_annual_polypharmacy_<year>/5.6_polypharmacy_level_by_rx_insurance_subgroup.csv`
+and
+`Outputs/5.x_annual_polypharmacy_<year>/5.8_annual_polypharmacy_atc3_prevalence_by_rx_insurance.csv`,
+then
+renders age group, sex, and race/ethnicity subsections. Within each subsection,
+polypharmacy prevalence bars are faceted across four prescription insurance
+comparison groups on one row: Commercial, Medicaid, Medicare Advantage, and
+Medicare FFS. It also renders a top-10 ATC3 class prevalence plot faceted by
+the four groups.
+
+Run this after `5.10_prepare_polypharmacy_insurance_subgroup_inputs.R` and
+`5.8_describe_annual_polypharmacy_atc3_prevalence.R`. When knitting directly
+from RStudio, set the YAML `analysis_year` parameter; the report will look first
+in `Outputs/5.x_annual_polypharmacy_<year>` unless `polypharmacy_output_dir` is
+provided.
 
 ## `Code/Old`
 
