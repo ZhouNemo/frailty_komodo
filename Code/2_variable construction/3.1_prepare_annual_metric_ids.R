@@ -3,12 +3,12 @@ source("Code/2_variable construction/3.0_normalized_clinical_metrics_helpers.R")
 # Project: Frailty_Komoto normalized annual clinical metrics
 # Author: Nemo Zhou
 # Date started: 2026-06-30
-# Date last updated: 2026-07-16
+# Date last updated: 2026-08-04
 #
 # ---- Purpose ----
 # Prepare or validate the shared patient-year denominator for the normalized
 # clinical-metrics pipeline. The script writes selected years to:
-#   - 2_annual_metric_ids
+#   - 2_2022_komodo_medicare_comparison_metric_ids
 #
 # This denominator is the only patient-year entry point for normalized diagnosis
 # and procedure event matching. Patient-level rows remain in Redshift and only
@@ -58,6 +58,18 @@ eligibility_columns <- tolower(names(DBI::dbGetQuery(
   paste0("SELECT * FROM ", eligibility_identifier, " LIMIT 0")
 )))
 
+missing_required_eligibility_columns <- setdiff(
+  config$required_eligibility_columns,
+  eligibility_columns
+)
+if (length(missing_required_eligibility_columns) > 0L) {
+  stop(
+    "The configured eligibility table is missing required comparison-contract column(s): ",
+    paste(missing_required_eligibility_columns, collapse = ", "),
+    ". Rebuild the fixed-2022 comparison cohort explicitly before rerunning downstream stages."
+  )
+}
+
 race_select <- if ("patient_race_ethnicity" %in% eligibility_columns) {
   "e.patient_race_ethnicity"
 } else {
@@ -69,7 +81,14 @@ optional_eligibility_column_types <- c(
   patient_zip = "VARCHAR(32)",
   geography_days_in_year = "INTEGER",
   geography_valid_from_date = "DATE",
-  geography_valid_to_date = "DATE"
+  geography_valid_to_date = "DATE",
+  overall_comparison_eligible = "INTEGER",
+  plan_comparison_eligible = "INTEGER",
+  plan_comparison_group = "VARCHAR(16)",
+  pooled_medicare_segment = "VARCHAR(32)",
+  n_valid_medicare_segments = "INTEGER",
+  has_same_year_non_inpatient_event = "INTEGER",
+  has_medicare_medicaid_dual_coverage = "INTEGER"
 )
 
 optional_select_sql <- vapply(
@@ -108,9 +127,16 @@ if (!table_exists(con, write_schema, config$ids_table)) {
          rx_secondary_insurance_segment VARCHAR(128),
          patient_state VARCHAR(32),
          patient_zip VARCHAR(32),
-         geography_days_in_year INTEGER,
-         geography_valid_from_date DATE,
-         geography_valid_to_date DATE
+          geography_days_in_year INTEGER,
+          geography_valid_from_date DATE,
+          geography_valid_to_date DATE,
+          overall_comparison_eligible INTEGER,
+          plan_comparison_eligible INTEGER,
+          plan_comparison_group VARCHAR(16),
+          pooled_medicare_segment VARCHAR(32),
+          n_valid_medicare_segments INTEGER,
+          has_same_year_non_inpatient_event INTEGER,
+          has_medicare_medicaid_dual_coverage INTEGER
        )
        DISTKEY(patid)
        SORTKEY(analysis_year, patid);"
@@ -128,7 +154,7 @@ missing_optional_id_columns <- setdiff(
 )
 if (length(missing_optional_id_columns) > 0L) {
   message(
-    "Adding optional upstream geography columns to ",
+    "Adding optional upstream comparison-contract columns to ",
     write_schema,
     ".",
     config$ids_table,
@@ -221,9 +247,16 @@ if (isTRUE(config$refresh_metric_ids)) {
          rx_secondary_insurance_segment,
          patient_state,
          patient_zip,
-         geography_days_in_year,
-         geography_valid_from_date,
-         geography_valid_to_date
+          geography_days_in_year,
+          geography_valid_from_date,
+          geography_valid_to_date,
+          overall_comparison_eligible,
+          plan_comparison_eligible,
+          plan_comparison_group,
+          pooled_medicare_segment,
+          n_valid_medicare_segments,
+          has_same_year_non_inpatient_event,
+          has_medicare_medicaid_dual_coverage
        )
        SELECT DISTINCT
          e.patient_id || '_' || e.analysis_year::VARCHAR AS patid,
@@ -252,7 +285,21 @@ if (isTRUE(config$refresh_metric_ids)) {
          ", optional_select_sql[["geography_valid_from_date"]], "
            AS geography_valid_from_date,
          ", optional_select_sql[["geography_valid_to_date"]], "
-           AS geography_valid_to_date
+            AS geography_valid_to_date,
+          ", optional_select_sql[["overall_comparison_eligible"]], "
+            AS overall_comparison_eligible,
+          ", optional_select_sql[["plan_comparison_eligible"]], "
+            AS plan_comparison_eligible,
+          ", optional_select_sql[["plan_comparison_group"]], "
+            AS plan_comparison_group,
+          ", optional_select_sql[["pooled_medicare_segment"]], "
+            AS pooled_medicare_segment,
+          ", optional_select_sql[["n_valid_medicare_segments"]], "
+            AS n_valid_medicare_segments,
+          ", optional_select_sql[["has_same_year_non_inpatient_event"]], "
+            AS has_same_year_non_inpatient_event,
+          ", optional_select_sql[["has_medicare_medicaid_dual_coverage"]], "
+            AS has_medicare_medicaid_dual_coverage
        FROM ", eligibility_identifier, " e
        WHERE e.analysis_year IN (", sql_values(config$id_years), ")
          AND e.patient_id IS NOT NULL;"

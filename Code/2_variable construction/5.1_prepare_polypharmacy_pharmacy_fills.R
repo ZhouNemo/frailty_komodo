@@ -7,7 +7,7 @@ source("Code/2_variable construction/5.0_annual_polypharmacy_helpers.R")
 #
 # ---- Purpose ----
 # Build cleaned eligible pharmacy fills for selected patient-years in
-# `2_annual_metric_ids` from `komodo_ext.pharmacy_events`. The default
+# `2_annual_metric_ids` from `komodo_202606.pharmacy_events`. The default
 # configuration processes 2016 only. The script requires either reviewed
 # transaction-status keep values or an explicit exploratory unfiltered override.
 # It keeps patient-level rows inside Redshift and writes selected years plus

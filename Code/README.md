@@ -3,21 +3,22 @@
 Project: Frailty_Komoto
 Author: Nemo Zhou
 Date started: 2026-06-16
-Date last updated: 2026-07-16
+Date last updated: 2026-08-02
 
 This folder contains the R and helper scripts used to connect to Komodo,
 diagnose source tables, build annual eligibility cohorts, generate aggregate
-summaries, run the normalized annual clinical-metrics pipeline, and run the
-annual polypharmacy pipeline. Scripts should be run in numeric order unless a
-task-specific note says otherwise.
+summaries, run the normalized annual clinical-metrics pipeline, run the annual
+polypharmacy pipeline, and construct 2022 healthcare-utilization variables.
+Scripts should be run in numeric order unless a task-specific note says
+otherwise.
 
 The previous CFI and raw-event clinical-metrics processing scripts are archived
 in `Code/Old/`. The active clinical-metrics pathway now follows
 `Documents/01_CLINICAL_METRICS_DATA_PROCESSING_FLOW.md` and uses:
 
 ```text
-komodo_ext.normalized_dx_events
-komodo_ext.normalized_procedure_events
+komodo_202606.normalized_dx_events
+komodo_202606.normalized_procedure_events
 ```
 
 It does not stage raw inpatient/non-inpatient events, flatten arrays, apply
@@ -27,12 +28,16 @@ candidate event prefilters, or apply the older first-25-array-elements cap.
 
 - `Code/0_test`: all `0.xx` connection, diagnostic, source-validation, and
   lookup-conversion scripts.
-- `Code/1_eligbility`: all `1.xx` annual eligibility, cohort QA, and
-  eligibility-restriction scripts.
+- `Code/1_eligbility`: the active fixed-2022 Medicare-comparison cohort
+  builder. `Code/1_eligbility/Old` contains the archived multi-script annual
+  eligibility workflow.
 - `Code/2_variable construction`: the active `3.x` normalized clinical-metric
-  build and `5.0` through `5.7` polypharmacy construction pipeline.
+  build, `5.0` through `5.7` polypharmacy construction pipeline, and `6.x`
+  healthcare-utilization pipeline.
 - `Code/2_EDA`: the `2.x` Table 1 scripts, `4.x` descriptive analysis scripts,
   and `5.8` through `5.10` polypharmacy reporting scripts.
+- `Code/3_result`: final aggregate result-table reports, including the 2022
+  Komodo overall and Medicare plan-comparison Table 1 outputs.
 
 The numeric prefixes remain unchanged so existing output names and workflow
 references remain recognizable. Run scripts from the repository root because
@@ -44,11 +49,42 @@ underlying polypharmacy metric.
 `Code/Old` remains the historical archive and is not part of this active folder
 layout.
 
+## `1_run_2022_komodo_medicare_comparison_pipeline.R`
+
+Root-level orchestrator for the current fixed-2022 Medicare-comparison
+workflow. By default it reuses the existing broader comparison denominator
+without applying the same-year non-inpatient rule; set
+`FRAILTY_REBUILD_2022_COMPARISON_COHORT=true` or the documented R option to
+run the eligibility builder explicitly. It reuses the existing restricted CFI
+score table, uses the SAS-derived normalized-table CCW-30 adaptation for this
+comparison only, and runs, in order, normalized clinical metrics, healthcare
+utilization, and Census-region/ZIP3-rurality enrichment.
+It produces the final Redshift dataset:
+
+```text
+6_2022_komodo_medicare_comparison_all_eligible_clinical_metrics_with_utilization
+```
+
+Before running the root pipeline, build the local RUCC state-plus-ZIP3 lookup
+with `0.9_build_rucc_2023_zip3_rurality_lookup.R`. The root pipeline requires
+the resulting
+`Documents/Rurality Reference Tables/rucc_2023_zip3_rurality_lookup.csv` and
+does not rebuild it automatically.
+
+Run it from the project root after reviewing credentials and source-table
+access. The normalized-metrics QA is written under
+`Outputs/3.x_normalized_clinical_metrics_2022_all_eligible`; utilization and
+geography QA are written under
+`Outputs/6.x_annual_healthcare_utilization_2022_all_eligible`. It does not
+render the final Table 1 report; render that report separately after reviewing
+the aggregate QA outputs.
+
 ## Numeric Order
 
 Within the semantic folders, follow the numeric workflow order: `0_test`,
 `1_eligbility`, `2_variable construction` for the metric pipelines, and
-`2_EDA` for aggregate analysis and reporting.
+`2_EDA` for aggregate analysis and reporting, followed by `3_result` for final
+result-table reports.
 - `Code/Old`: historical scripts that are no longer part of the active workflow,
   retained for provenance or scoring-engine reuse. `Documents/Old` and
   `Outputs/Old` follow the same convention for historical documents and outputs.
@@ -76,7 +112,7 @@ cohort-building, or summary scripts.
 ## `0.3_check_insurance_group_date_overlap.R`
 
 Diagnostic script for `PATIENT_INSURANCE` date-overlap behavior. It creates a
-small random sample of patients from `komodo_ext.patient_insurance`, pulls
+small random sample of patients from `komodo_202606.patient_insurance`, pulls
 insurance rows for those sampled patients, and checks overlapping
 `row_valid_start` / `row_valid_end` spans for simultaneous primary insurance
 group differences.
@@ -118,7 +154,7 @@ Run this before the normalized annual clinical-metrics pipeline.
 ## `0.7_check_krd_table_inventory.R`
 
 Schema-level diagnostic for listing visible tables in the configured Komodo
-Redshift read schema, currently `komodo_ext`. It compares expected dictionary
+Redshift read schema, currently `komodo_202606`. It compares expected dictionary
 table names with visible Redshift table names and saves aggregate inventory
 outputs under `Outputs`.
 
@@ -129,14 +165,105 @@ tables.
 
 Targeted maintenance script for the annual polypharmacy pipeline. It repairs
 selected-year duplicate event keys in `2_polypharmacy_pharmacy_fills` without
-rescanning `komodo_ext.pharmacy_events`, but only when duplicate rows agree on
+rescanning `komodo_202606.pharmacy_events`, but only when duplicate rows agree on
 the analytic exposure fields `fill_date`, `ndc11`, and `days_supply`. It prints
 aggregate duplicate summaries and keeps patient-level rows inside Redshift.
 
 Run this only after `5.6_check_annual_polypharmacy_metrics.R` reports duplicate
 rows in `2_polypharmacy_pharmacy_fills`; then rerun `5.6`.
 
-## `1.1_build_annual_eligible_population.R`
+## `0.9_build_rucc_2023_zip3_rurality_lookup.R`
+
+Local reference-table preparation script for the supplied USDA Rural-Urban
+Continuum Code workbooks and the March 2026 ZIP-to-county crosswalk. It
+combines the older workbook's 2023 RUCC field with the newer 2023-specific
+workbook by FIPS, prefers the newer value when both files contain a FIPS, and
+maps RUCC values to `Metro`, `Urban`, `Rural`, or `Unknown`. It creates a
+state-plus-ZIP3 lookup because KRD stores the patient ZIP as three digits and
+also provides `patient_state`. ZIP3 categories are assigned from modal positive
+residence-ratio weights. Any unresolved rows are filled from the `rurality`
+package's ZIP3 modal RUCA classification: Metropolitan maps to `Metro`,
+Micropolitan and Small town map to `Urban`, and Rural maps to `Rural`. The
+lookup retains both the original res_ratio result and the package fallback
+diagnostics.
+
+The script reads the three workbooks from the user's `Downloads` directory and
+writes the reference tables and aggregate QA under:
+
+```text
+Documents/Rurality Reference Tables
+```
+
+The workbook reader uses Python's standard library so this local reference
+step does not require installing `readxl` into the project environment.
+
+Run it from the project root before changing
+`Code/2_variable construction/7.1_add_census_region_and_rurality.R`:
+
+```powershell
+& 'C:\Program Files\R\R-4.3.1\bin\Rscript.exe' --vanilla -e `
+  ".libPaths(c('D:/Users/xia.zhou/Documents/Frailty_Komoto/Frailty_Komodo/renv/library/R-4.3/x86_64-w64-mingw32', .libPaths())); source('Code/0_test/0.9_build_rucc_2023_zip3_rurality_lookup.R')"
+```
+
+## `0.10_build_ccw30_sas_lookups.R` and `0.11_check_ccw30_rules.R`
+
+`0.10` converts the versioned CCW-30 SAS source files under
+`Documents/Clinical Metric Look Up Tables/CCW30/source/` into checked-in
+metadata and exact ICD-10-CM lookup CSVs, including source hashes and the two
+claim-level exclusion lists. `0.11` is a local synthetic rule test for one
+inpatient, one versus two outpatient dates, duplicate same-day outpatient
+records, all-zero patients, the six-cancer aggregate, and the 30-condition
+total. Run these scripts after changing the copied SAS sources or lookup
+conversion logic; neither connects to Redshift.
+
+## `1.1_build_2022_komodo_medicare_comparison_cohort.R`
+
+Active fixed-2022 cohort builder for the Komodo-versus-Medicare comparison.
+It directly applies the common comparison-cohort exclusions, retains valid
+insurance group/segment switchers for the overall denominator, derives pooled
+primary/secondary Medicare MA/FFS eligibility, joins race/ethnicity and unioned
+annual residence geography, and can write either the existing CFI-source cohort
+or a broader comparison cohort through
+`frailty.2022_komodo_medicare_comparison_cohort.config`:
+
+```text
+1_2022_komodo_medicare_comparison_cohort_all_eligible
+```
+
+The standalone builder defaults to `require_same_year_non_inpatient = FALSE`
+and writes the `_all_eligible` table under
+`Outputs/1_eligibility_2022_all_eligible`. The same-year non-inpatient rule is
+reserved for an explicit CFI-source configuration targeting
+`1_2022_komodo_medicare_comparison_cohort`; the root comparison runner uses the
+broader default and reuses the existing CFI score table. Both outputs carry
+overall and plan-comparison flags, the same-year non-inpatient flag, and a
+Medicare-and-Medicaid paired-coverage flag for Table 2 dual eligibility.
+
+Each builder run also writes aggregate flow-count CSVs under the configured
+output directory. `1.1_2022_komodo_medicare_cohort_flow.csv` contains the
+overall Komodo flow, while `1.1_2022_komodo_medicare_plan_flow.csv` contains the
+Medicare MA/FFS plan-comparison flow and its final Komodo MA and Komodo FFS
+branch counts. Each flow reports person-year and distinct-patient counts
+entering, excluded at, and retained after each stage; counts are suppressed
+under the project minimum-cell rule.
+
+The builder defaults to the current project read schema `komodo_202606`. If the connected
+Redshift account exposes the KRD source tables under another schema, set
+`options(komodo.schema = "your_schema")` or
+`Sys.setenv(KOMODO_SCHEMA = "your_schema")` before sourcing the script. The
+builder also checks for a unique schema containing all required source tables
+and reports the visible schema/table situation when it cannot resolve one. It
+probes the configured source table directly because Redshift external schemas
+may not be listed in `information_schema`.
+It uses the explicit Redshift target defined in `0_test/0.1_connect to Komodo.R`
+so it does not depend on `ohdsilab_connect()` defaults.
+
+## Archived annual eligibility workflow
+
+The prior 2016-2025 annual workflow is retained under
+`Code/1_eligbility/Old`. It is not part of the current 2022 comparison run.
+
+### `Old/1.1_build_annual_eligible_population.R`
 
 Production script for building the `1_annual_eligible_cohort` patient-year
 denominator in the user's Redshift write schema. It derives candidate calendar
@@ -146,7 +273,7 @@ row per included patient and analysis year.
 
 Run this after annual eligibility logic has been finalized.
 
-## `1.2_check_annual_eligible_population.R`
+### `Old/1.2_check_annual_eligible_population.R`
 
 Aggregate QA script for the materialized `1_annual_eligible_cohort` table. It
 verifies row counts, insurance-category distributions, and other non-patient
@@ -154,22 +281,22 @@ level diagnostics needed before downstream annual analyses.
 
 Run this after `1.1_build_annual_eligible_population.R`.
 
-## `1.3_join_race_ethnicity_to_eligible_cohort.R`
+### `Old/1.3_join_race_ethnicity_to_eligible_cohort.R`
 
 Production script for adding the KRD recommended patient-level race/ethnicity
 variable to the annual eligible cohort. It archives the original race-free
 cohort as `1_annual_eligible_cohort_without_race`, collapses
-`komodo_ext.patient_race_ethnicity` to one row per patient, and saves the
+`komodo_202606.patient_race_ethnicity` to one row per patient, and saves the
 race-enhanced cohort back to `1_annual_eligible_cohort`.
 
 Run this after `1.1` and `1.2` when race/ethnicity-stratified summaries or
 clinical metrics are needed.
 
-## `1.4_filter_clinical_metrics_to_non_inpatient_claim_eligible.R`
+### `Old/1.4_filter_clinical_metrics_to_non_inpatient_claim_eligible.R`
 
 Upstream eligibility-restriction script for the annual clinical-metrics and
 polypharmacy denominator. It reads `1_annual_eligible_cohort`, keeps
-patient-years with at least one row in `komodo_ext.non_inpatient_events` during
+patient-years with at least one row in `komodo_202606.non_inpatient_events` during
 the same calendar analysis year, and writes:
 
 ```text
@@ -186,11 +313,11 @@ in `frailty.normalized_clinical_metrics.config` before running `3.13`.
 
 Run this after `1.1`, `1.2`, and `1.3`, and before `3.1` or `3.13`.
 
-## `1.5_join_patient_geography_to_clinical_metrics.R`
+### `Old/1.5_join_patient_geography_to_clinical_metrics.R`
 
 Upstream geography-attribution script for the restricted annual eligibility
 table. It reads `1_annual_eligible_cohort_non_inpatient_claim_eligible`, joins
-to `komodo_ext.patient_geography`, and selects the `patient_zip` where the
+to `komodo_202606.patient_geography`, and selects the `patient_zip` where the
 patient spent the most clipped days in the calendar analysis year based on
 `valid_from_date` and `valid_to_date`. It also carries `patient_state`,
 `geography_days_in_year`, and the clipped geography date span used for the
@@ -210,7 +337,7 @@ them through the standard final-table builder.
 
 Run this after `1.4_filter_clinical_metrics_to_non_inpatient_claim_eligible.R`.
 
-## `1.6_run_annual_metrics_for_all_years.R`
+### `Old/1.6_run_annual_metrics_for_all_years.R`
 
 All-year convenience runner for the current annual clinical metrics and
 polypharmacy workflow. By default, it loops over 2016-2025 and, for each year,
@@ -237,11 +364,11 @@ If `5.7_run_annual_polypharmacy.R` stops because a selected-year
 NDC11-to-ATC crosswalk is missing, run the printed PowerShell n2c command and
 rerun this `1.6` script.
 
-## `1.7_filter_clinical_metrics_to_alive_at_year_end.R`
+### `Old/1.7_filter_clinical_metrics_to_alive_at_year_end.R`
 
 Later-added post-final-table eligibility restriction for year-specific clinical
 metrics analyses. It reads `6_annual_clinical_metrics_shared`, checks
-`komodo_ext.patient_mortality`, and keeps patient-years with no recorded death
+`komodo_202606.patient_mortality`, and keeps patient-years with no recorded death
 on or before December 31 of the analysis year. Because the KRD death date is
 month-truncated, a death date of `2022-12-01` excludes that patient from the
 2022 analysis.
@@ -258,7 +385,7 @@ values. Run it after `3.11_build_normalized_annual_clinical_metrics.R` and
 table for year-end-survivor analyses. Configure selected years or a different
 source table with the `frailty.alive_at_year_end_filter.config` option.
 
-## `1.8_filter_clinical_metrics_to_2022.R`
+### `Old/1.8_filter_clinical_metrics_to_2022.R`
 
 Fixed-project-year analysis-preparation filter. It reads the completed
 `6_annual_clinical_metrics_shared_alive_at_year_end` table and writes only rows
@@ -323,7 +450,8 @@ It defines the standard configuration, Redshift connection, SQL quoting,
 lookup loading, table validation, batched CSV lookup staging, event-window
 predicate builders, configurable external-scan chunk helpers, connection cleanup,
 and a bounded SQL retry wrapper. It does not create Redshift tables when
-sourced by itself.
+sourced by itself. Its connection uses the same explicit `ohdsi_lab` Redshift
+target as `Code/0_test/0.1_connect to Komodo.R`.
 
 `event_window_sql()` emits the event-date filter using the bare event-date
 column (no `CAST` wrapper) with a half-open upper bound, so external Parquet
@@ -346,27 +474,28 @@ The main override option is:
 options("frailty.normalized_clinical_metrics.config" = list(...))
 ```
 
-The default configuration processes 2016 only. Single-year runs automatically
+The default configuration processes the fixed 2022 comparison cohort. Single-year runs automatically
 use static full-year event bounds to keep external scans pushdown-prunable.
 
 ## `3.1_prepare_annual_metric_ids.R`
 
 Normalized denominator preparation script. It creates or refreshes selected
-years in `2_annual_metric_ids` from the configured eligibility table,
+years in the configured metric-ID table from the configured eligibility table,
 preserving patient-year dates, demographics, race/ethnicity when available,
 annual insurance fields, and optional upstream geography fields from `1.5`.
 `patient_id` is retained for normalized event joins and `patid` is retained as
 the downstream patient-year key.
 
-Run this after `0.6`, `1.1`, `1.2`, and `1.3`. If the analytic denominator
-requires same-year non-inpatient claims or geography attribution, run `1.4` and
-`1.5` first and point `eligibility_table` at the restricted upstream eligibility
-table.
+For the current broader 2022 Medicare-comparison project, the root runner sets
+`eligibility_table = "1_2022_komodo_medicare_comparison_cohort_all_eligible"`,
+`analysis_years = 2022`, and `id_years = 2022`. The `_all_eligible` cohort joins
+geography and does not apply the same-year non-inpatient rule. The archived
+`1.4` and `1.5` scripts are not part of this run.
 
 ## `3.4_prepare_annual_code_presence.R`
 
 Builds compact patient-year CFI-relevant procedure code presence from
-`komodo_ext.normalized_procedure_events`. It joins `2_annual_metric_ids` by
+`komodo_202606.normalized_procedure_events`. It joins `2_2022_komodo_medicare_comparison_metric_ids` by
 `patient_id`, restricts `event_date` to the patient-year window (bare-column,
 half-open bounds via the helper predicates), filters `procedure_code` to the
 reviewed CFI CPT/HCPCS lookup ranges, and writes the following table. The
@@ -378,38 +507,48 @@ chunks can multiply scans on a flat, unsorted Parquet prefix. Use
 bytes scanned, and use `"all"` when a single selected-window scan is preferred:
 
 ```text
-2_annual_procedure_code_presence
+2_2022_komodo_medicare_comparison_procedure_code_presence
 ```
 
 The active diagnosis path does not materialize full patient-year diagnosis code
 presence. `3.6_match_annual_clinical_metric_features.R` matches
-`komodo_ext.normalized_dx_events` directly to the reviewed diagnosis lookup
+`komodo_202606.normalized_dx_events` directly to the reviewed diagnosis lookup
 rules and writes compact feature matches instead.
 
-Run this after `3.1_prepare_annual_metric_ids.R`.
+The broader comparison runner skips this stage and reuses the existing
+`2_2022_komodo_medicare_comparison_procedure_code_presence` table used by the
+restricted CFI calculation. Run this after `3.1_prepare_annual_metric_ids.R`
+only when calculating CFI for a new denominator.
 
 ## `3.5_prepare_annual_hiv_diagnosis_evidence.R`
 
 Builds compact HIV-only diagnosis evidence from
-`komodo_ext.normalized_dx_events`. It keeps `event_date` as `diagnosis_date`,
+`komodo_202606.normalized_dx_events`. It keeps `event_date` as `diagnosis_date`,
 derives `claim_setting` from `source_table`, applies the exact HIV diagnosis
-lookup, and writes:
+lookup, and writes the configured HIV evidence table. The broader comparison
+runner writes `2_2022_komodo_medicare_comparison_all_eligible_hiv_diagnosis_evidence`.
 
 ```text
-2_annual_hiv_diagnosis_evidence
+configured HIV diagnosis evidence table
 ```
 
 Run this after `3.1_prepare_annual_metric_ids.R`.
+The `3.13` runner skips this stage when `ccw_algorithm = "ccw30_normalized"`
+because `3.8a_calculate_normalized_ccw30_variables.R` writes the HIV evidence
+from its shared exact-code diagnosis scan.
 
 ## `3.6_match_annual_clinical_metric_features.R`
 
-Stages the reviewed diagnosis lookup rules, joins
-`2_annual_metric_ids` directly to `komodo_ext.normalized_dx_events`, and writes
+Stages the reviewed diagnosis lookup rules, joins the configured metric-ID table
+directly to `komodo_202606.normalized_dx_events`, and writes
 compact lookup-filtered CFI, CCW, and Gagne diagnosis feature matches without
 building all-code diagnosis presence. It first builds a selected-year temporary
 ID stage distributed by `patient_id`, then builds a **persistent, restartable**
-diagnosis candidate stage (`2_annual_dx_candidate_stage`) containing only
-diagnosis codes whose prefixes can match CFI, CCW, or Gagne lookup rules.
+diagnosis candidate stage containing only
+diagnosis codes whose prefixes can match CFI, CCW-56, or Gagne lookup rules.
+When `ccw_algorithm = "ccw30_normalized"`, it skips CCW-56 matching entirely
+while retaining Gagne matching; the dedicated `3.8a` stage reads normalized
+diagnoses directly for the SAS-derived CCW-30 branch.
 
 The candidate stage banks the expensive Spectrum scan of the external diagnosis
 table using bare-column half-open scan windows. The scan runs in configurable
@@ -422,16 +561,18 @@ tradeoff. Chunks land in a raw TEMP build table, are collapsed to distinct
 patient-year diagnosis codes, and validate before persistent rows are replaced.
 The manifest is invalidated before the
 persistent data slice is touched, so a failed replace cannot leave a completed
-manifest pointing at missing or partial data. A companion manifest
-(`2_annual_dx_candidate_stage_manifest`) records the scan window, prefix length,
+manifest pointing at missing or partial data. A companion configured
+candidate-stage manifest records the scan window, prefix length,
 prefix set, and lookup version(s) per built year. Set
 `reuse_candidate_stage = TRUE` to skip the scan and resume at feature matching,
 which reuses the banked stage only when every requested year's manifest matches
 this run (so a stale, smoke, or differently-parameterized stage is rebuilt).
-The manifest does not fingerprint every row in `2_annual_metric_ids`, so
+The manifest does not fingerprint every row in the configured metric-ID table, so
 candidate-stage reuse assumes the selected-year denominator has not changed
 since the stage was banked; keep the default `reuse_candidate_stage = FALSE`
 after rebuilding `3.1_prepare_annual_metric_ids.R`.
+In reuse mode (`calculate_cfi = FALSE`), this script matches only CCW and Gagne
+diagnosis features and leaves the existing restricted CFI match table unchanged.
 Compact features are matched from that candidate stage by first building a
 small distinct-code-to-feature map and then hash-joining the map back to the
 patient-year candidate stage. CFI-relevant procedure presence uses the same
@@ -439,74 +580,98 @@ distinct-code map pattern before being carried into CFI feature matches. It
 writes:
 
 ```text
-2_annual_dx_candidate_stage
-2_annual_dx_candidate_stage_manifest
-2_annual_cfi_feature_matches
-2_annual_ccw_condition_matches
-2_annual_gagne_group_matches
+configured *_dx_candidate_stage
+configured *_dx_candidate_stage_manifest
+configured CFI feature matches (restricted source or newly calculated)
+configured CCW condition matches
+configured Gagne group matches
 ```
 
-Run this after `3.4_prepare_annual_code_presence.R`.
+Run this after `3.1_prepare_annual_metric_ids.R`; the broader comparison runner
+uses it without `3.4` and reuses the existing CFI inputs.
 
 ## `3.7_calculate_normalized_annual_cfi_scores.R`
 
-Calculates CFI scores from `2_annual_cfi_feature_matches`, joins CFI weights,
+Calculates CFI scores from the configured CFI feature-match table, joins CFI weights,
 adds the `0.10288` intercept, and writes:
 
 ```text
-6_annual_cfi_scores
+6_2022_komodo_medicare_comparison_cfi_scores
 ```
 
-Run this after `3.6_match_annual_clinical_metric_features.R`.
+The broader comparison runner skips this script and reuses
+`6_2022_komodo_medicare_comparison_cfi_scores`; run it only when creating or
+refreshing the restricted CFI-source scores.
 
 ## `3.8_calculate_normalized_annual_ccw_variables.R`
 
 Calculates CCW long condition rows, wide condition indicators, and reviewed
-group counts from `2_annual_ccw_condition_matches`. It writes:
+group counts from the configured CCW match table. The broader comparison runner
+writes the `_all_eligible` CCW output tables.
 
 ```text
-6_annual_ccw_conditions_long
-6_annual_ccw_condition_indicators
-6_annual_ccw_group_counts
+configured CCW long, indicator, and group-count tables
 ```
 
 Run this after `3.6_match_annual_clinical_metric_features.R`.
 
+## `3.8a_calculate_normalized_ccw30_variables.R`
+
+The dedicated fixed-2022 comparison CCW-30 scorer. It joins eligible IDs to
+`normalized_dx_events` once with a unioned exact-code CCW-30 and HIV
+lookup. It writes the existing HIV diagnosis-evidence contract as well as
+CCW-30 evidence, classifies `INPATIENT_EVENTS` and `NON_INPATIENT_EVENTS` as
+inpatient and outpatient, respectively, and applies the simplified CCW
+setting/date rules.
+It writes matched evidence, qualified long conditions, 30 wide base flags plus
+derived `ccw_cancer`, and a 30-base-condition total-count table. BPH and
+stroke/TIA claim-level exclusions are documented in the lookup but intentionally
+omitted because normalized diagnosis events lack a reliable claim key. This
+branch creates no legacy `index_*` CCW group-count columns.
+
+Run it only through `3.13` when `ccw_algorithm = "ccw30_normalized"`.
+
 ## `3.9_calculate_normalized_annual_gagne_score.R`
 
-Calculates Gagne combined comorbidity scores and group indicators from
-`2_annual_gagne_group_matches`. It writes:
+Calculates Gagne combined comorbidity scores and group indicators from the
+configured Gagne match table. The broader comparison runner writes the
+`_all_eligible` Gagne score table.
 
 ```text
-6_annual_gagne_scores
+configured Gagne score table
 ```
 
 Run this after `3.6_match_annual_clinical_metric_features.R`.
 
 ## `3.10_calculate_normalized_annual_hiv_status.R`
 
-Calculates annual-only, diagnosis-based HIV status from
-`2_annual_hiv_diagnosis_evidence`. The confirmation rule remains one inpatient
-HIV diagnosis evidence date or at least two distinct non-inpatient HIV
-diagnosis dates in the same patient-year. It writes:
+Calculates annual-only, diagnosis-based HIV status from the configured HIV
+diagnosis evidence table. The default confirmation rule is one inpatient HIV
+diagnosis evidence date or at least two distinct non-inpatient HIV diagnosis
+dates in the same patient-year. The 2022 comparison runner sets the
+configurable non-inpatient threshold to one to match the CCW
+diagnosis-presence rule. It writes:
 
 ```text
-6_annual_hiv_status
+configured HIV status table
 ```
 
 Run this after `3.5_prepare_annual_hiv_diagnosis_evidence.R`.
 
 ## `3.11_build_normalized_annual_clinical_metrics.R`
 
-Builds the final normalized annual clinical-metrics table by joining
-`2_annual_metric_ids` to the completed CFI, CCW, Gagne, and HIV outputs. It
-writes:
+Builds the final normalized annual clinical-metrics table by joining the
+configured metric-ID table to the completed CFI, CCW, Gagne, and HIV outputs. In
+the broader comparison run, CFI is a left join to the existing restricted CFI
+score table, so patient-years outside that source population retain NULL CFI
+fields. It writes:
 
 ```text
-6_annual_clinical_metrics_shared
+configured final clinical-metrics table
 ```
 
-Run this after `3.7`, `3.8`, `3.9`, and `3.10` have completed successfully.
+Run this after the configured `3.8`, `3.9`, and `3.10` stages have completed;
+`3.7` is required only when `calculate_cfi = TRUE`.
 
 ## `3.12_check_normalized_annual_clinical_metrics.R`
 
@@ -515,17 +680,18 @@ schemas, selected-year row counts, duplicate keys, compact extraction counts,
 HIV confirmation-rule consistency, and final-table completeness. It writes:
 
 ```text
-Outputs/3.12_normalized_annual_clinical_metrics_qa.csv
+Outputs/3.x_normalized_clinical_metrics_2022_all_eligible/3.12_normalized_annual_clinical_metrics_qa.csv
 ```
 
 Run this after `3.11_build_normalized_annual_clinical_metrics.R`.
 
 ## `3.13_run_normalized_annual_clinical_metrics.R`
 
-Run-all wrapper for the normalized `3.x` flow. It sources `3.1`, `3.4`,
-`3.5`, `3.6`, `3.7`, `3.8`, `3.9`, `3.10`, `3.11`, and `3.12` in order using
-the current `frailty.normalized_clinical_metrics.config` option. The default
-configuration is 2016 only.
+Run-all wrapper for the normalized `3.x` flow. It sources the configured
+denominator, HIV, diagnosis matching, CCW, Gagne, final-build, and QA stages in
+order. It includes `3.4` and `3.7` only when `calculate_cfi = TRUE`; the broader
+comparison runner sets `calculate_cfi = FALSE`, `reuse_cfi_scores = TRUE`, and
+reuses the existing CFI score table. The default configuration is 2016 only.
 
 Use this only after reviewing the configured years and confirming that selected
 years should be refreshed.
@@ -663,7 +829,7 @@ Outputs/5.x_annual_polypharmacy_<years>/5.3_polypharmacy_ndc11_atc_crosswalk_<ye
 
 ## `5.1_prepare_polypharmacy_pharmacy_fills.R`
 
-Builds cleaned selected-year pharmacy fills from `komodo_ext.pharmacy_events`
+Builds cleaned selected-year pharmacy fills from `komodo_202606.pharmacy_events`
 after joining to `2_annual_metric_ids` by `patient_id`. It validates the
 confirmed pharmacy schema fields, keeps character 11-digit NDC11 values,
 requires positive days supply, and applies reviewed transaction filters from
@@ -886,6 +1052,190 @@ Run this after `5.10_prepare_polypharmacy_insurance_subgroup_inputs.R` and
 from RStudio, set the YAML `analysis_year` parameter; the report will look first
 in `Outputs/5.x_annual_polypharmacy_<year>` unless `polypharmacy_output_dir` is
 provided.
+
+## `6.0_annual_healthcare_utilization_helpers.R`
+
+Shared configuration and Redshift helper functions for the fixed 2022
+healthcare-utilization workflow. The default denominator is every eligible
+patient-year in the configured clinical-metrics table, which the root runner
+sets to `6_2022_komodo_medicare_comparison_all_eligible_clinical_metrics_shared`, retaining all medical
+insurance groups and segments, including unknown values. The helper configures the event table,
+patient-year utilization table, combined analysis table, output directory, and
+small-cell threshold.
+
+## `6.1_prepare_annual_healthcare_utilization_events.R`
+
+Builds the configured healthcare-utilization event table, one eligible patient,
+utilization ID, and utilization category. It extracts the four inpatient visit
+types with `claim_from_date` for 2022 annual assignment and `total_los` as the
+primary duration, across all eligible medical insurance groups and segments. It
+collapses qualifying non-inpatient ED lines into a three-definition event
+universe: `visit_type = OUTPATIENT ED`, `service_subcategory = EMERGENCY DEPT
+ENCOUNTER`, or one of the reviewed ED revenue codes (`0450`, `0451`, `0452`,
+`0456`, `0459`, `0981`). It retains separate event flags for the three
+definitions; CPT and HCPCS codes are not used. ED events are restricted to
+service intervals overlapping 2022, clipped to the 2022 boundaries, and
+summarized as inclusive calendar-day spans. The script retains aggregate-safe
+validation fields and event-quality flags. It also creates long-term-care
+events from qualifying 2022 `PROCEDURE_CODE` values `99304` through `99310`.
+
+## `6.2_calculate_annual_healthcare_utilization_variables.R`
+
+Builds the configured healthcare-utilization metrics table, one row per eligible 2022
+patient-year across all medical insurance groups and segments. For acute inpatient,
+inpatient hospice, skilled nursing, and IPF, it produces the full any-visit,
+event-count, duration, and duration-quality metric family. Long-term care uses
+the same metric family. For ED, it produces
+only the three definition-specific prevalence indicators
+`ed_visit_type_any_visit`, `ed_service_subcategory_any_visit`, and
+`ed_revenue_code_any_visit`; no combined ED count or duration metrics are
+retained. Patients with no qualifying events remain in the table.
+
+## `6.3_build_2022_clinical_metrics_with_utilization.R`
+
+Builds the derivative table
+`6_2022_komodo_medicare_comparison_all_eligible_clinical_metrics_with_utilization` by joining the
+patient-year utilization variables to the current 2022 clinical-metrics table.
+It preserves the source table unchanged, retains every source column, and
+checks that every eligible patient-year has exactly one combined row.
+
+## `6.4_describe_annual_healthcare_utilization.R`
+
+Writes aggregate-only utilization report inputs for overall Komodo, medical
+insurance groups and segments, age group, sex, and CFI level to:
+
+```text
+Outputs/6.x_annual_healthcare_utilization_2022_all_eligible/6.4_healthcare_utilization_summary_2022.csv
+Outputs/6.x_annual_healthcare_utilization_2022_all_eligible/6.4_healthcare_utilization_summary_by_subgroup_2022.csv
+Outputs/6.x_annual_healthcare_utilization_2022_all_eligible/6.4_healthcare_utilization_duration_distribution_2022.csv
+```
+
+The summary CSVs report eligible denominators, the number and percentage of
+eligible patient-years with at least one visit, distinct visits, and event-level
+duration mean, SD, minimum, quartiles, median, maximum, IQR, and missingness.
+The internal ED event-level summaries use the union of the three ED definitions;
+the final patient-year table and `3.1` report use the three definition-specific
+prevalence indicators.
+The duration-frequency CSV contains only aggregate duration values and event
+counts for boxplot scatter overlays; it does not contain patient or utilization
+identifiers. CFI levels are `Robust` (`<0.15`), `Prefrail` (`0.15-<0.25`), and
+`Frail` (`>=0.25`). Missing or unknown stratification values are labeled
+`Unknown`. Small cells are suppressed before export.
+
+## `6.5_check_annual_healthcare_utilization.R`
+
+Writes aggregate source, cohort, event-collapse, three-flag ED-definition,
+skilled-nursing, long-term-care, duration, completeness, and duplicate-key QA to:
+
+```text
+Outputs/6.x_annual_healthcare_utilization_2022_all_eligible/6.5_healthcare_utilization_qa_2022.csv
+```
+
+The script stops after writing QA if prepared events, patient-year variables, or
+the combined table have duplicate keys or if any eligible 2022 patient-year is
+missing downstream output.
+
+## `6.6_run_annual_healthcare_utilization.R`
+
+One-command runner for the entire fixed 2022 all-insurance healthcare-
+utilization workflow. It assumes
+`6_2022_komodo_medicare_comparison_all_eligible_clinical_metrics_shared`
+already exists, performs a limited aggregate source preflight in `6.1`, runs
+`6.1` through `6.5`, and renders the offline `6.7` HTML report. It does not
+rerun annual eligibility or clinical-metric construction. Before rendering, it
+automatically detects the bundled RStudio Pandoc installation and sets
+`RSTUDIO_PANDOC` when needed. When sourced by the root comparison runner, it
+preserves the runner's configured `_all_eligible` output directory and table
+names.
+
+## `6.7_visualize_annual_healthcare_utilization.Rmd`
+
+CSV-only R Markdown report for overall Komodo and healthcare-utilization
+visualizations by insurance plan, insurance segment, age group, sex, and CFI
+level. It reads the aggregate CSVs written by `6.4`, does not connect to
+Redshift, and renders overall visit-type plots plus separate subgroup plots for
+each visit type. The prevalence bar plot and duration boxplot are arranged on
+one row. Duration boxplots label the median, Q1, and Q3 and include
+aggregate-frequency scatter overlays. Tables contain mean (SD), median (IQR),
+minimum, and maximum duration in days. The report is rendered to
+`Outputs/6.x_annual_healthcare_utilization_2022_all_eligible/6.7_annual_healthcare_utilization_2022.html`.
+The output-directory parameter accepts either an absolute path or a relative
+path from the repository root when rendered from RStudio or the command line.
+
+## `7.1_add_census_region_and_rurality.R`
+
+Adds Census region and ZIP3-derived rurality fields to the new comparison table
+`6_2022_komodo_medicare_comparison_all_eligible_clinical_metrics_with_utilization` in place. Census region
+is assigned from `patient_state` using the four Census regions. Rurality is
+read from the versioned state-plus-ZIP3 lookup at
+`Documents/Rurality Reference Tables/rucc_2023_zip3_rurality_lookup.csv` and
+joined using normalized `patient_state` plus the three-digit `patient_zip`.
+The final categories are `Metro`, `Urban`, and `Rural`. After enrichment, the
+stage excludes patient-years with a missing or `Unknown` Census region or
+rurality from the final comparison table; this includes missing, invalid, and
+unmatched geography and any matched lookup row labeled `Unknown`.
+
+The stage migrates the legacy RUCA-named columns to the RUCC contract:
+`rurality_primary_rucc`, `rurality_group`,
+`rurality_zip3_mixed_rucc_flag`, `rurality_zip3_n_zip5`, and
+`rurality_assignment_method`. It does not create a new Redshift table.
+
+It writes aggregate pre-filter geography and exclusion QA to:
+
+```text
+Outputs/6.x_annual_healthcare_utilization_2022_all_eligible/7.1_census_region_rurality_qa_2022.csv
+```
+
+Run `0.9_build_rucc_2023_zip3_rurality_lookup.R` whenever the supplied source
+workbooks change, then run this stage after
+`6.6_run_annual_healthcare_utilization.R`. Run 7.1 before the final result-table
+report in `Code/3_result`.
+
+## `3.1_create_2022_komodo_medicare_table1.Rmd`
+
+Aggregate-only R Markdown report for the two Komodo-only tables defined in
+`Documents/14_2022_MEDICARE_COMPARATIVE_ANALYSIS_PLAN.md`. It must be run after
+`7.1_add_census_region_and_rurality.R`. The report queries only grouped
+summary statistics from the enriched clinical-metrics/utilization table; it
+does not collect patient-level or
+utilization-level rows and does not create a Redshift table. It renders two
+professionally formatted tables: the overall Komodo population combining
+the full broader `overall_comparison_eligible` denominator and the
+plan-specific `plan_comparison_eligible` Komodo MA versus Komodo FFS
+comparison. Age groups are rows within each table. Only the plan-specific table
+includes dual eligibility, defined as a Medicare-and-Medicaid primary/secondary
+pair on any 2022 span. CFI rows require both a nonmissing reused score and the
+same-year non-inpatient flag. Both tables include the requested CCW subset plus
+annual HIV status and hospitalization, skilled nursing, long-term-care, and
+three definition-specific emergency-department utilization percentages.
+
+Before rendering, the report runs aggregate-only comparison-contract checks and
+writes `Outputs/3_result_2022/3.1_2022_komodo_medicare_table1_contract_qa.csv`.
+Medicare columns are reserved for the external CMS analysis.
+
+The report writes:
+
+```text
+Outputs/3_result_2022/3.1_2022_komodo_medicare_table1.html
+Outputs/3_result_2022/3.1_2022_komodo_medicare_table1_overall.csv
+Outputs/3_result_2022/3.1_2022_komodo_medicare_table1_plans.csv
+```
+
+Render it from the repository root with:
+
+```r
+rmarkdown::render(
+  input = "Code/3_result/3.1_create_2022_komodo_medicare_table1.Rmd",
+  output_file = "3.1_2022_komodo_medicare_table1.html",
+  output_dir = "Outputs/3_result_2022",
+  params = list(
+    analysis_year = 2022L,
+    result_output_dir = "Outputs/3_result_2022",
+    analysis_table = "6_2022_komodo_medicare_comparison_all_eligible_clinical_metrics_with_utilization",
+    utilization_output_dir = "Outputs/6.x_annual_healthcare_utilization_2022_all_eligible"
+  )
+)
+```
 
 ## `Code/Old`
 

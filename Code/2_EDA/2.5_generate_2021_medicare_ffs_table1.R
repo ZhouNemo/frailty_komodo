@@ -13,7 +13,7 @@ library(keyring)
 # Generate an aggregate Table 1 for patients in the 2021 annual eligible
 # population whose primary medical insurance classification is Medicare FFS.
 # The source cohort is the materialized 1_annual_eligible_cohort created by
-# Code/1_eligbility/1.1_build_annual_eligible_population.R. The subgroup count and Table 1
+# Code/1_eligbility/Old/1.1_build_annual_eligible_population.R. The subgroup count and Table 1
 # are saved as CSV files in the project Outputs folder.
 #
 
@@ -22,7 +22,7 @@ Sys.setenv(
   "DATABASECONNECTOR_JAR_FOLDER" = "D:/Users/xia.zhou/Documents/JDBC Driver"
 )
 
-komodo_schema <- "komodo_ext"
+komodo_schema <- "komodo_202606"
 write_schema <- paste0("work_", keyring::key_get("db_username"))
 
 # ---- Analysis parameters ----
@@ -85,7 +85,7 @@ if (
   stop(
     "No eligible patients were found for primary Medicare FFS in ",
     analysis_year,
-    ". Run and check Code/1_eligbility/1.1_build_annual_eligible_population.R first."
+    ". Run and check Code/1_eligbility/Old/1.1_build_annual_eligible_population.R first."
   )
 }
 

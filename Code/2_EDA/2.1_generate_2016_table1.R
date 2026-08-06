@@ -24,7 +24,7 @@ Sys.setenv(
   "DATABASECONNECTOR_JAR_FOLDER" = "D:/Users/xia.zhou/Documents/JDBC Driver"
 )
 
-komodo_schema <- "komodo_ext"
+komodo_schema <- "komodo_202606"
 write_schema <- paste0("work_", keyring::key_get("db_username"))
 
 # ---- Analysis parameters ----
@@ -82,7 +82,7 @@ if (length(missing_years) > 0L) {
   stop(
     "No eligible cohort rows were found for: ",
     paste(missing_years, collapse = ", "),
-    ". Run and check Code/1_eligbility/1.1_build_annual_eligible_population.R first."
+    ". Run and check Code/1_eligbility/Old/1.1_build_annual_eligible_population.R first."
   )
 }
 

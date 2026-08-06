@@ -3,14 +3,14 @@ source("Code/2_variable construction/3.0_normalized_clinical_metrics_helpers.R")
 # Project: Frailty_Komoto normalized annual HIV status
 # Author: Nemo Zhou
 # Date started: 2026-06-30
-# Date last updated: 2026-07-16
+# Date last updated: 2026-08-04
 #
 # ---- Purpose ----
 # Calculate annual HIV status for the normalized 3.x pipeline from compact HIV
 # diagnosis evidence. This script points the validated shared confirmation
 # engine archived under `Code/Old` at:
-#   - 2_annual_hiv_diagnosis_evidence
-#   - 6_annual_hiv_status
+#   - 2_2022_komodo_medicare_comparison_hiv_diagnosis_evidence
+#   - 6_2022_komodo_medicare_comparison_hiv_status
 
 config <- get_normalized_clinical_metrics_config()
 previous_clinical_metric_config <- getOption("frailty.clinical_metrics.config")
@@ -21,6 +21,8 @@ options(
     ids_table = config$ids_table,
     diagnosis_matches_table = config$hiv_evidence_table,
     hiv_status_table = config$hiv_status_table,
+    hiv_non_inpatient_min_distinct_dates =
+      config$hiv_non_inpatient_min_distinct_dates,
     lookup_dir = config$lookup_dir
   )
 )

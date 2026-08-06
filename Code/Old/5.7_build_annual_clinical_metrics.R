@@ -6,13 +6,14 @@ library(DBI)
 # Project: Frailty_Komoto annual shared clinical metrics table
 # Author: Nemo Zhou
 # Date started: 2026-06-27
-# Date last updated: 2026-06-27
+# Date last updated: 2026-08-06
 #
 # ---- Purpose ----
 # Build the final shared annual clinical metrics table by joining the shared
 # denominator to completed CFI, CCW, Gagne, and HIV annual outputs. This script
 # does not rescan raw KRD claims and does not recompute metric logic. It writes
-# one row per eligible patient-year to:
+# one row per eligible patient-year, including any propagated cohort-contract
+# fields needed by the fixed-2022 comparison report, to:
 #   - annual_clinical_metrics_shared
 #
 # The default configuration processes 2016 only for validation. Additional years
@@ -22,7 +23,7 @@ Sys.setenv(
   "DATABASECONNECTOR_JAR_FOLDER" = "D:/Users/xia.zhou/Documents/JDBC Driver"
 )
 
-komodo_schema <- "komodo_ext"
+komodo_schema <- "komodo_202606"
 write_schema <- paste0("work_", keyring::key_get("db_username"))
 
 default_config <- list(
@@ -33,7 +34,8 @@ default_config <- list(
   ccw_group_counts_table = "annual_ccw_group_counts",
   gagne_scores_table = "annual_gagne_scores",
   hiv_status_table = "annual_hiv_status",
-  final_table = "annual_clinical_metrics_shared"
+  final_table = "annual_clinical_metrics_shared",
+  allow_empty_ccw_group_columns = FALSE
 )
 
 config <- utils::modifyList(
@@ -57,6 +59,7 @@ ccw_group_counts_table <- config$ccw_group_counts_table
 gagne_scores_table <- config$gagne_scores_table
 hiv_status_table <- config$hiv_status_table
 final_table <- config$final_table
+allow_empty_ccw_group_columns <- isTRUE(config$allow_empty_ccw_group_columns)
 
 con <- ohdsilab_connect(
   username = keyring::key_get("db_username"),
@@ -207,6 +210,9 @@ ccw_group_columns <- grep(
   get_columns(write_schema, ccw_group_counts_table),
   value = TRUE
 )
+# The SAS-derived CCW-30 branch intentionally has only a total count, not the
+# legacy index_* group columns. Guard against an empty name reaching SQL.
+ccw_group_columns <- ccw_group_columns[nzchar(ccw_group_columns)]
 gagne_indicator_columns <- grep(
   "^gagne_group_[0-9][0-9]_",
   get_columns(write_schema, gagne_scores_table),
@@ -216,11 +222,17 @@ gagne_indicator_columns <- grep(
 if (length(ccw_indicator_columns) == 0L) {
   stop("No CCW condition indicator columns were found.")
 }
-if (length(ccw_group_columns) == 0L) {
+if (length(ccw_group_columns) == 0L && !allow_empty_ccw_group_columns) {
   stop("No CCW group-count columns were found.")
 }
 if (length(gagne_indicator_columns) == 0L) {
   stop("No Gagne group indicator columns were found.")
+}
+
+ccw_group_select_expressions <- if (length(ccw_group_columns) > 0L) {
+  paste0("ccw_group.", quote_identifier(ccw_group_columns))
+} else {
+  character()
 }
 
 select_expressions <- c(
@@ -233,7 +245,7 @@ select_expressions <- c(
   paste0("ccw_ind.", quote_identifier(ccw_indicator_columns)),
   "ccw_ind.ccw_condition_count",
   "ccw_ind.lookup_version AS ccw_condition_lookup_version",
-  paste0("ccw_group.", quote_identifier(ccw_group_columns)),
+  ccw_group_select_expressions,
   "ccw_group.ccw_total_condition_count",
   "ccw_group.lookup_version AS ccw_group_lookup_version",
   paste0("gagne.", quote_identifier(gagne_indicator_columns)),
@@ -289,7 +301,7 @@ select_sql <- paste0(
   paste(select_expressions, collapse = ",\n       "),
   "
      FROM ", ids_identifier, " ids
-     INNER JOIN ", cfi_identifier, " cfi
+     LEFT JOIN ", cfi_identifier, " cfi
        ON ids.patid = cfi.patid
       AND ids.analysis_year = cfi.analysis_year
      INNER JOIN ", ccw_ind_identifier, " ccw_ind
@@ -306,6 +318,50 @@ select_sql <- paste0(
       AND ids.analysis_year = hiv.analysis_year
      WHERE ids.analysis_year IN (", sql_values(analysis_years), ")"
 )
+
+comparison_contract_column_types <- c(
+  overall_comparison_eligible = "INTEGER",
+  plan_comparison_eligible = "INTEGER",
+  plan_comparison_group = "VARCHAR(16)",
+  pooled_medicare_segment = "VARCHAR(32)",
+  n_valid_medicare_segments = "INTEGER",
+  has_same_year_non_inpatient_event = "INTEGER",
+  has_medicare_medicaid_dual_coverage = "INTEGER"
+)
+if (table_exists(write_schema, final_table)) {
+  existing_final_columns <- get_columns(write_schema, final_table)
+  missing_contract_columns <- intersect(
+    names(comparison_contract_column_types),
+    setdiff(ids_columns, existing_final_columns)
+  )
+  for (column in missing_contract_columns) {
+    DatabaseConnector::executeSql(
+      con,
+      paste0(
+        "ALTER TABLE ", final_identifier, " ADD COLUMN ", quote_identifier(column),
+        " ", comparison_contract_column_types[[column]], ";"
+      )
+    )
+  }
+  metric_column_types <- c(
+    stats::setNames(rep("INTEGER", length(ccw_indicator_columns)), ccw_indicator_columns),
+    stats::setNames(rep("INTEGER", length(ccw_group_columns)), ccw_group_columns),
+    ccw_condition_count = "INTEGER",
+    ccw_total_condition_count = "INTEGER",
+    ccw_condition_lookup_version = "VARCHAR(128)",
+    ccw_group_lookup_version = "VARCHAR(128)"
+  )
+  missing_metric_columns <- setdiff(names(metric_column_types), existing_final_columns)
+  for (column in missing_metric_columns) {
+    DatabaseConnector::executeSql(
+      con,
+      paste0(
+        "ALTER TABLE ", final_identifier, " ADD COLUMN ", quote_identifier(column),
+        " ", metric_column_types[[column]], ";"
+      )
+    )
+  }
+}
 
 if (!table_exists(write_schema, final_table)) {
   DatabaseConnector::executeSql(

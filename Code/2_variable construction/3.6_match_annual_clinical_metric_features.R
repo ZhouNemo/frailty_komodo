@@ -3,18 +3,18 @@ source("Code/2_variable construction/3.0_normalized_clinical_metrics_helpers.R")
 # Project: Frailty_Komoto normalized annual clinical metrics
 # Author: Nemo Zhou
 # Date started: 2026-06-30
-# Date last updated: 2026-07-16
+# Date last updated: 2026-08-05
 #
 # ---- Purpose ----
 # Match normalized diagnosis events to reviewed CFI, CCW, and Gagne lookup
 # rules without materializing all diagnosis code presence. This script first
 # stages selected-year eligible patient IDs by `patient_id`, builds a
-# lookup-candidate diagnosis stage from `komodo_ext.normalized_dx_events`, then
+# lookup-candidate diagnosis stage from `komodo_202606.normalized_dx_events`, then
 # matches compact features from that smaller stage. It also matches compact
 # patient-year procedure code presence to CFI procedure ranges.
 #
 # The lookup-candidate diagnosis stage is a persistent, restartable write-schema
-# table (2_annual_dx_candidate_stage). The expensive external Spectrum scan is
+# table (2_2022_komodo_medicare_comparison_dx_candidate_stage). The expensive external Spectrum scan is
 # built into a TEMP staging table and validated first; only then are the
 # persistent year slices replaced, so a failed scan can never erase a previously
 # banked stage. The candidate scan runs in configurable retry-wrapped chunks,
@@ -23,21 +23,22 @@ source("Code/2_variable construction/3.0_normalized_clinical_metrics_helpers.R")
 # variable-length prefix join against the external diagnosis stream. After the
 # candidate stage is ready, compact feature
 # matching uses distinct-code-to-feature maps and hash-joins those maps back to
-# patient-year rows. A companion manifest (2_annual_dx_candidate_stage_manifest)
+# patient-year rows. A companion manifest (2_2022_komodo_medicare_comparison_dx_candidate_stage_manifest)
 # records the scan window, prefix length, prefix set, and lookup version(s) per
 # built year; reuse_candidate_stage = TRUE reuses the banked stage only when
 # every requested year's manifest matches this run. The manifest does not
-# fingerprint every row in 2_annual_metric_ids, so candidate-stage reuse assumes
+# fingerprint every row in 2_2022_komodo_medicare_comparison_metric_ids, so candidate-stage reuse assumes
 # the selected-year denominator has not changed since the stage was banked. The
 # scan window uses bare-column, half-open date literals (see event_window_sql)
 # so the external Parquet scan stays prunable. It writes selected years to:
-#   - 2_annual_dx_candidate_stage
-#   - 2_annual_dx_candidate_stage_manifest
-#   - 2_annual_cfi_feature_matches
-#   - 2_annual_ccw_condition_matches
-#   - 2_annual_gagne_group_matches
+#   - 2_2022_komodo_medicare_comparison_dx_candidate_stage
+#   - 2_2022_komodo_medicare_comparison_dx_candidate_stage_manifest
+#   - 2_2022_komodo_medicare_comparison_cfi_feature_matches
+#   - 2_2022_komodo_medicare_comparison_ccw_condition_matches
+#   - 2_2022_komodo_medicare_comparison_gagne_group_matches
 
 config <- get_normalized_clinical_metrics_config()
+ccw56_enabled <- identical(config$ccw_algorithm, "ccw56_presence")
 con <- connect_komodo()
 # Do NOT register on.exit(disconnect_komodo(con)) here. At the top level of a
 # source()d script, on.exit() fires early and closes the connection before the
@@ -104,10 +105,11 @@ diagnosis_feature_map_identifier <- quote_identifier(diagnosis_feature_map_table
 procedure_distinct_code_identifier <- quote_identifier(procedure_distinct_code_table)
 procedure_feature_map_identifier <- quote_identifier(procedure_feature_map_table)
 
-missing_lookup_files <- c(
+required_lookup_paths <- c(
   diagnosis_lookup_path,
-  procedure_lookup_path
-)[!file.exists(c(diagnosis_lookup_path, procedure_lookup_path))]
+  if (config$calculate_cfi) procedure_lookup_path
+)
+missing_lookup_files <- required_lookup_paths[!file.exists(required_lookup_paths)]
 if (length(missing_lookup_files) > 0L) {
   stop(
     "Missing normalized clinical metric lookup files:\n",
@@ -127,12 +129,14 @@ table_has_columns(
   config$normalized_dx_table,
   c("patient_id", "event_date", "dx_code")
 )
-table_has_columns(
-  con,
-  write_schema,
-  config$procedure_presence_table,
-  c("patid", "analysis_year", "procedure_code")
-)
+if (config$calculate_cfi) {
+  table_has_columns(
+    con,
+    write_schema,
+    config$procedure_presence_table,
+    c("patid", "analysis_year", "procedure_code")
+  )
+}
 
 diagnosis_lookup <- read_lookup_csv(diagnosis_lookup_path)
 require_columns(
@@ -159,7 +163,11 @@ diagnosis_lookup$lookup_row_id <- seq_len(nrow(diagnosis_lookup))
 
 active_diagnosis_lookup <- diagnosis_lookup[
   diagnosis_lookup$code_system %in% "ICD10CM" &
-    diagnosis_lookup$metric %in% c("CFI", "CCW", "GAGNE") &
+    diagnosis_lookup$metric %in% c(
+      if (config$calculate_cfi) "CFI",
+      if (ccw56_enabled) "CCW",
+      "GAGNE"
+    ) &
     !is.na(diagnosis_lookup$final_match_after_flattening) &
     toupper(diagnosis_lookup$final_match_after_flattening) == "TRUE",
   c(
@@ -177,7 +185,7 @@ active_diagnosis_lookup <- diagnosis_lookup[
 ]
 
 if (nrow(active_diagnosis_lookup) == 0L) {
-  stop("No active ICD-10-CM diagnosis lookup rows were found for CFI/CCW/Gagne.")
+  stop("No active ICD-10-CM diagnosis lookup rows were found for the configured metrics.")
 }
 
 candidate_prefix_length <- if (is.null(config$diagnosis_candidate_prefix_length)) {
@@ -275,46 +283,48 @@ candidate_prefix_lookup <- unique(active_diagnosis_lookup[
   c("candidate_prefix", "candidate_prefix_length")
 ])
 
-procedure_lookup <- read_lookup_csv(procedure_lookup_path)
-require_columns(
-  procedure_lookup,
-  c(
-    "lookup_version",
-    "metric",
-    "feature_id",
-    "feature_name",
-    "code_system",
-    "range_start",
-    "range_end",
-    "match_type"
-  ),
-  "CFI procedure lookup"
-)
-
-procedure_lookup$metric <- toupper(procedure_lookup$metric)
-procedure_lookup$match_type <- tolower(procedure_lookup$match_type)
-
-active_procedure_lookup <- procedure_lookup[
-  procedure_lookup$code_system %in% c("CPT_HCPCS", "CPTHCPCS") &
-    procedure_lookup$metric %in% "CFI" &
-    procedure_lookup$match_type %in% "range" &
-    !is.na(procedure_lookup$range_start) &
-    procedure_lookup$range_start != "" &
-    !is.na(procedure_lookup$range_end) &
-    procedure_lookup$range_end != "",
-  c(
-    "lookup_version",
-    "metric",
-    "feature_id",
-    "feature_name",
-    "range_start",
-    "range_end",
-    "match_type"
+if (config$calculate_cfi) {
+  procedure_lookup <- read_lookup_csv(procedure_lookup_path)
+  require_columns(
+    procedure_lookup,
+    c(
+      "lookup_version",
+      "metric",
+      "feature_id",
+      "feature_name",
+      "code_system",
+      "range_start",
+      "range_end",
+      "match_type"
+    ),
+    "CFI procedure lookup"
   )
-]
 
-if (nrow(active_procedure_lookup) == 0L) {
-  stop("No active CFI CPT/HCPCS procedure lookup rows were found.")
+  procedure_lookup$metric <- toupper(procedure_lookup$metric)
+  procedure_lookup$match_type <- tolower(procedure_lookup$match_type)
+
+  active_procedure_lookup <- procedure_lookup[
+    procedure_lookup$code_system %in% c("CPT_HCPCS", "CPTHCPCS") &
+      procedure_lookup$metric %in% "CFI" &
+      procedure_lookup$match_type %in% "range" &
+      !is.na(procedure_lookup$range_start) &
+      procedure_lookup$range_start != "" &
+      !is.na(procedure_lookup$range_end) &
+      procedure_lookup$range_end != "",
+    c(
+      "lookup_version",
+      "metric",
+      "feature_id",
+      "feature_name",
+      "range_start",
+      "range_end",
+      "match_type"
+    )
+  ]
+
+  if (nrow(active_procedure_lookup) == 0L) {
+    stop("No active CFI CPT/HCPCS procedure lookup rows were found.")
+  }
 }
 
 DatabaseConnector::executeSql(
@@ -388,20 +398,22 @@ execute_insert_batches(
   candidate_prefix_lookup,
   numeric_columns = "candidate_prefix_length"
 )
-execute_insert_batches(
-  con,
-  procedure_stage_identifier,
-  c(
-    "lookup_version",
-    "metric",
-    "feature_id",
-    "feature_name",
-    "range_start",
-    "range_end",
-    "match_type"
-  ),
-  active_procedure_lookup
-)
+if (config$calculate_cfi) {
+  execute_insert_batches(
+    con,
+    procedure_stage_identifier,
+    c(
+      "lookup_version",
+      "metric",
+      "feature_id",
+      "feature_name",
+      "range_start",
+      "range_end",
+      "match_type"
+    ),
+    active_procedure_lookup
+  )
+}
 
 feature_table_sql <- function(identifier) {
   paste0(
@@ -419,10 +431,19 @@ feature_table_sql <- function(identifier) {
   )
 }
 
-if (!table_exists(con, write_schema, config$cfi_feature_matches_table)) {
-  DatabaseConnector::executeSql(con, feature_table_sql(cfi_matches_identifier))
+if (config$calculate_cfi) {
+  if (!table_exists(con, write_schema, config$cfi_feature_matches_table)) {
+    DatabaseConnector::executeSql(con, feature_table_sql(cfi_matches_identifier))
+  }
+} else if (!table_exists(con, write_schema, config$cfi_feature_matches_table)) {
+  stop(
+    "reuse_cfi_scores = TRUE requires the existing CFI feature-match table: ",
+    write_schema,
+    ".",
+    config$cfi_feature_matches_table
+  )
 }
-if (!table_exists(con, write_schema, config$ccw_feature_matches_table)) {
+if (ccw56_enabled && !table_exists(con, write_schema, config$ccw_feature_matches_table)) {
   DatabaseConnector::executeSql(con, feature_table_sql(ccw_matches_identifier))
 }
 if (!table_exists(con, write_schema, config$gagne_feature_matches_table)) {
@@ -431,7 +452,7 @@ if (!table_exists(con, write_schema, config$gagne_feature_matches_table)) {
 
 for (table in c(
   config$cfi_feature_matches_table,
-  config$ccw_feature_matches_table,
+  if (ccw56_enabled) config$ccw_feature_matches_table,
   config$gagne_feature_matches_table
 )) {
   table_has_columns(
@@ -826,11 +847,24 @@ if (length(missing_candidate_years) > 0L || length(zero_candidate_years) > 0L) {
 DatabaseConnector::executeSql(
   con,
   paste0(
-    "DELETE FROM ", cfi_matches_identifier, "
-     WHERE analysis_year IN (", sql_values(config$analysis_years), ");
-     DELETE FROM ", ccw_matches_identifier, "
-     WHERE analysis_year IN (", sql_values(config$analysis_years), ");
-     DELETE FROM ", gagne_matches_identifier, "
+    if (config$calculate_cfi) {
+      paste0(
+        "DELETE FROM ", cfi_matches_identifier, "
+         WHERE analysis_year IN (", sql_values(config$analysis_years), ");
+        "
+      )
+    } else {
+      ""
+    },
+    if (ccw56_enabled) {
+      paste0(
+        "DELETE FROM ", ccw_matches_identifier, "
+         WHERE analysis_year IN (", sql_values(config$analysis_years), ");\n"
+      )
+    } else {
+      ""
+    },
+    "DELETE FROM ", gagne_matches_identifier, "
      WHERE analysis_year IN (", sql_values(config$analysis_years), ");"
   )
 )
@@ -929,18 +963,23 @@ insert_diagnosis_metric_matches <- function(metric, target_identifier) {
   )
 }
 
-insert_diagnosis_metric_matches("CFI", cfi_matches_identifier)
-insert_diagnosis_metric_matches("CCW", ccw_matches_identifier)
+if (config$calculate_cfi) {
+  insert_diagnosis_metric_matches("CFI", cfi_matches_identifier)
+}
+if (ccw56_enabled) {
+  insert_diagnosis_metric_matches("CCW", ccw_matches_identifier)
+}
 insert_diagnosis_metric_matches("GAGNE", gagne_matches_identifier)
 
-message(
-  format(Sys.time(), "[%Y-%m-%d %H:%M:%S] "),
-  "Building CFI procedure code-to-feature map from distinct procedure codes."
-)
-flush.console()
-DatabaseConnector::executeSql(
-  con,
-  paste0(
+if (config$calculate_cfi) {
+  message(
+    format(Sys.time(), "[%Y-%m-%d %H:%M:%S] "),
+    "Building CFI procedure code-to-feature map from distinct procedure codes."
+  )
+  flush.console()
+  DatabaseConnector::executeSql(
+    con,
+    paste0(
     "DROP TABLE IF EXISTS ", procedure_distinct_code_identifier, ";
      CREATE TEMP TABLE ", procedure_distinct_code_identifier, "
      DISTSTYLE ALL
@@ -964,14 +1003,14 @@ DatabaseConnector::executeSql(
      INNER JOIN ", procedure_stage_identifier, " l
        ON p.procedure_code >= l.range_start
       AND p.procedure_code <= l.range_end;"
+    )
   )
-)
 
-message(format(Sys.time(), "[%Y-%m-%d %H:%M:%S] "), "Hash-joining CFI procedure feature map.")
-flush.console()
-DatabaseConnector::executeSql(
-  con,
-  paste0(
+  message(format(Sys.time(), "[%Y-%m-%d %H:%M:%S] "), "Hash-joining CFI procedure feature map.")
+  flush.console()
+  DatabaseConnector::executeSql(
+    con,
+    paste0(
     "INSERT INTO ", cfi_matches_identifier, " (
          patid,
          analysis_year,
@@ -993,8 +1032,9 @@ DatabaseConnector::executeSql(
      INNER JOIN ", procedure_feature_map_identifier, " m
        ON p.procedure_code = m.procedure_code
      WHERE p.analysis_year IN (", sql_values(config$analysis_years), ");"
+    )
   )
-)
+}
 
 check_feature_duplicates <- function(table_identifier, label) {
   duplicate_qa <- DBI::dbGetQuery(
@@ -1030,29 +1070,44 @@ check_feature_duplicates <- function(table_identifier, label) {
   }
 }
 
-check_feature_duplicates(cfi_matches_identifier, "CFI feature matches")
-check_feature_duplicates(ccw_matches_identifier, "CCW condition matches")
+if (config$calculate_cfi) {
+  check_feature_duplicates(cfi_matches_identifier, "CFI feature matches")
+}
+if (ccw56_enabled) {
+  check_feature_duplicates(ccw_matches_identifier, "CCW condition matches")
+}
 check_feature_duplicates(gagne_matches_identifier, "Gagne group matches")
 
+feature_match_count_sql <- c(
+  if (config$calculate_cfi) {
+    paste0(
+      "SELECT analysis_year, metric, match_type, COUNT(*)::BIGINT AS matched_rows\n",
+      "     FROM ", cfi_matches_identifier, "\n",
+      "     WHERE analysis_year IN (", sql_values(config$analysis_years), ")\n",
+      "     GROUP BY analysis_year, metric, match_type"
+    )
+  },
+  if (ccw56_enabled) {
+    paste0(
+      "SELECT analysis_year, metric, match_type, COUNT(*)::BIGINT AS matched_rows\n",
+      "     FROM ", ccw_matches_identifier, "\n",
+      "     WHERE analysis_year IN (", sql_values(config$analysis_years), ")\n",
+      "     GROUP BY analysis_year, metric, match_type"
+    )
+  },
+  paste0(
+    "SELECT analysis_year, metric, match_type, COUNT(*)::BIGINT AS matched_rows\n",
+    "     FROM ", gagne_matches_identifier, "\n",
+    "     WHERE analysis_year IN (", sql_values(config$analysis_years), ")\n",
+    "     GROUP BY analysis_year, metric, match_type"
+  )
+)
 print_query(
   con,
   "Checking normalized compact feature match counts.",
   paste0(
-    "SELECT analysis_year, metric, match_type, COUNT(*)::BIGINT AS matched_rows
-     FROM ", cfi_matches_identifier, "
-     WHERE analysis_year IN (", sql_values(config$analysis_years), ")
-     GROUP BY analysis_year, metric, match_type
-     UNION ALL
-     SELECT analysis_year, metric, match_type, COUNT(*)::BIGINT AS matched_rows
-     FROM ", ccw_matches_identifier, "
-     WHERE analysis_year IN (", sql_values(config$analysis_years), ")
-     GROUP BY analysis_year, metric, match_type
-     UNION ALL
-     SELECT analysis_year, metric, match_type, COUNT(*)::BIGINT AS matched_rows
-     FROM ", gagne_matches_identifier, "
-     WHERE analysis_year IN (", sql_values(config$analysis_years), ")
-     GROUP BY analysis_year, metric, match_type
-     ORDER BY analysis_year, metric, match_type"
+    paste(feature_match_count_sql, collapse = "\nUNION ALL\n"),
+    "\nORDER BY analysis_year, metric, match_type"
   )
 )
 
@@ -1061,8 +1116,8 @@ message(
   " compact feature matching complete: ",
   paste(
     paste0(write_schema, ".", c(
-      config$cfi_feature_matches_table,
-      config$ccw_feature_matches_table,
+      if (config$calculate_cfi) config$cfi_feature_matches_table,
+      if (ccw56_enabled) config$ccw_feature_matches_table,
       config$gagne_feature_matches_table
     )),
     collapse = ", "

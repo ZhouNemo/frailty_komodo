@@ -1,0 +1,895 @@
+---
+title: "2022 Komodo Medicare Table 1"
+author: "Nemo Zhou"
+date: "2026-08-04"
+output:
+  html_document:
+    toc: false
+    number_sections: false
+params:
+  analysis_year: 2022
+  result_output_dir: null
+  analysis_table: "6_2022_komodo_medicare_comparison_all_eligible_clinical_metrics_with_utilization"
+  utilization_output_dir: "Outputs/6.x_annual_healthcare_utilization_2022_all_eligible"
+---
+
+<!--
+Project: Frailty_Komoto 2022 Komodo Medicare comparative result table
+Author: Nemo Zhou
+Date started: 2026-07-17
+Date last updated: 2026-08-05
+
+Purpose:
+This R Markdown report creates the aggregate-only Table 1 specified in
+Documents/14_2022_MEDICARE_COMPARATIVE_ANALYSIS_PLAN.md. It is run after
+Code/2_variable construction/7.1_add_census_region_and_rurality.R, queries
+the configured 2022 comparison clinical-metrics-with-utilization table and the
+embedded utilization indicators, and compares the Komodo populations specified
+in the analysis plan. The broader comparison denominator is retained for all
+measures; CFI rows are summarized only among patient-years with a nonmissing
+reused CFI score and a same-year non-inpatient event. It renders the two
+Komodo-only tables specified in the plan: the full broader overall denominator
+and a plan-specific Komodo MA versus Komodo FFS table. Age groups are rows
+within each table rather than separate strata. Dual eligibility is reported
+only in the plan-specific table when Medicare and Medicaid occur together in
+either primary/secondary order on any 2022 insurance span. HIV status is reported in the
+selected-CCW section using the annual `hiv_status` indicator. Medicare columns
+are reserved for the external CMS analysis and are not populated here.
+No patient-level or utilization-level rows are collected locally. No Redshift
+table is created or modified.
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+
+suppressPackageStartupMessages(library(knitr))
+```
+
+```{r helpers, include=FALSE}
+find_project_root <- function() {
+  candidates <- normalizePath(
+    c(
+      getwd(),
+      file.path(getwd(), ".."),
+      file.path(getwd(), "..", ".."),
+      file.path(getwd(), "..", "..", "..")
+    ),
+    winslash = "/",
+    mustWork = FALSE
+  )
+
+  for (candidate in unique(candidates)) {
+    if (file.exists(file.path(candidate, "Documents", "00_DOCUMENTS_INDEX.md"))) {
+      return(candidate)
+    }
+  }
+  stop("Could not locate the Frailty_Komoto project root.")
+}
+
+project_root <- find_project_root()
+setwd(project_root)
+selected_analysis_year <- as.integer(params$analysis_year)
+if (
+  length(selected_analysis_year) != 1L ||
+    is.na(selected_analysis_year) ||
+    selected_analysis_year != 2022L
+) {
+  stop("This result report is fixed to analysis_year = 2022.")
+}
+
+resolve_project_path <- function(path_value, root) {
+  if (is.null(path_value) || length(path_value) == 0L || !nzchar(path_value)) {
+    return(NULL)
+  }
+
+  path_value <- as.character(path_value[[1]])
+  if (grepl("^([A-Za-z]:[\\\\/]|/)", path_value)) {
+    return(normalizePath(path_value, winslash = "/", mustWork = FALSE))
+  }
+
+  normalizePath(file.path(root, path_value), winslash = "/", mustWork = FALSE)
+}
+
+result_output_dir <- resolve_project_path(params$result_output_dir, project_root)
+if (is.null(result_output_dir)) {
+  result_output_dir <- file.path(project_root, "Outputs", "3_result_2022")
+}
+dir.create(result_output_dir, recursive = TRUE, showWarnings = FALSE)
+
+analysis_table <- params$analysis_table
+if (is.null(analysis_table) || length(analysis_table) == 0L) {
+  analysis_table <- "6_2022_komodo_medicare_comparison_all_eligible_clinical_metrics_with_utilization"
+}
+analysis_table <- as.character(analysis_table[[1]])
+if (is.na(analysis_table) || !nzchar(analysis_table)) {
+  stop("analysis_table must be a nonempty Redshift table name.")
+}
+
+utilization_output_dir <- resolve_project_path(
+  params$utilization_output_dir,
+  project_root
+)
+if (is.null(utilization_output_dir)) {
+  utilization_output_dir <- file.path(
+    project_root,
+    "Outputs",
+    paste0("6.x_annual_healthcare_utilization_", selected_analysis_year)
+  )
+}
+geography_qa_path <- file.path(
+  utilization_output_dir,
+  paste0("7.1_census_region_rurality_qa_", selected_analysis_year, ".csv")
+)
+if (!file.exists(geography_qa_path)) {
+  stop(
+    "Missing 7.1 geography QA output: ",
+    geography_qa_path,
+    ". Run Code/2_variable construction/7.1_add_census_region_and_rurality.R first."
+  )
+}
+
+source(file.path(
+  project_root,
+  "Code",
+  "2_variable construction",
+  "6.0_annual_healthcare_utilization_helpers.R"
+))
+
+sql_string_local <- function(value) {
+  paste0("'", gsub("'", "''", value, fixed = TRUE), "'")
+}
+
+quote_identifier_local <- function(identifier) {
+  paste0('"', gsub('"', '""', identifier, fixed = TRUE), '"')
+}
+
+format_integer <- function(value) {
+  format(as.numeric(value), big.mark = ",", scientific = FALSE, trim = TRUE)
+}
+
+format_sample_size <- function(value) {
+  if (is.na(value) || value < 11) "[suppressed]" else format_integer(value)
+}
+
+format_decimal <- function(value, digits = 1L) {
+  formatC(as.numeric(value), format = "f", digits = digits, big.mark = ",")
+}
+
+format_count_pct <- function(n, pct) {
+  if (is.na(n) || is.na(pct)) return("[suppressed]")
+  paste0(format_integer(n), " (", format_decimal(100 * pct), "%)")
+}
+
+format_continuous <- function(stat_row, mean_sd = TRUE, digits = 1L) {
+  if (stat_row$suppression_applied == "yes") return("[suppressed]")
+  if (is.na(stat_row$mean_value)) return("NA")
+  if (mean_sd) {
+    return(paste0(
+      format_decimal(stat_row$mean_value, digits = digits),
+      " (",
+      format_decimal(stat_row$sd_value, digits = digits),
+      ")"
+    ))
+  }
+  paste0(
+    format_decimal(stat_row$median_value, digits = digits),
+    " (",
+    format_decimal(stat_row$iqr_value, digits = digits),
+    ")"
+  )
+}
+
+make_row <- function(characteristic, values, group_labels) {
+  values <- as.character(values)
+  names(values) <- group_labels
+  data.frame(
+    c(list(Characteristic = characteristic), as.list(values)),
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+}
+
+selected_ccw_conditions <- data.frame(
+  condition_id = c(
+    "acute_myocardial_infarction",
+    "diabetes",
+    "heart_failure",
+    "hypertension",
+    "ischemic_heart_disease",
+    "alzheimers_disease",
+    "chronic_kidney_disease",
+    "copd",
+    "depressive_mood_disorders",
+    "hip_and_pelvic_fracture",
+    "cancer",
+    "hiv_status"
+  ),
+  label = c(
+    "Acute myocardial infarction",
+    "Diabetes",
+    "Heart failure",
+    "Hypertension",
+    "Ischemic heart disease",
+    "Alzheimer's disease and related disorder",
+    "Chronic kidney disease",
+    "Chronic obstructive pulmonary disease",
+    "Depression",
+    "Hip or pelvic fracture",
+    "Cancer",
+    "HIV"
+  ),
+  stringsAsFactors = FALSE
+)
+selected_ccw_conditions$indicator_column <- ifelse(
+  selected_ccw_conditions$condition_id == "hiv_status",
+  "hiv_status",
+  paste0("ccw_", selected_ccw_conditions$condition_id)
+)
+
+run_aggregate_queries <- function(comparison_mode = c("overall", "plans")) {
+  comparison_mode <- match.arg(comparison_mode)
+  connection_output <- capture.output({
+    con <- suppressMessages(suppressWarnings(connect_komodo()))
+  })
+  on.exit(disconnect_komodo(con), add = TRUE)
+
+  config <- get_annual_healthcare_utilization_config()
+  main_identifier <- qualified_identifier(write_schema, analysis_table)
+
+  main_columns <- tolower(names(DBI::dbGetQuery(
+    con,
+    paste0("SELECT * FROM ", main_identifier, " LIMIT 0")
+  )))
+  required_main_columns <- c(
+    "patient_id",
+    "analysis_year",
+    "mx_insurance_group",
+    "mx_insurance_segment",
+    "age",
+    "patient_gender",
+    "patient_race_ethnicity",
+    "mx_secondary_insurance_group",
+    "overall_comparison_eligible",
+    "plan_comparison_eligible",
+    "plan_comparison_group",
+    "pooled_medicare_segment",
+    "n_valid_medicare_segments",
+    "has_same_year_non_inpatient_event",
+    "has_medicare_medicaid_dual_coverage",
+    "census_region",
+    "rurality_group",
+    "cfi_score",
+    "gagne_score",
+    selected_ccw_conditions$indicator_column,
+    "acute_inpatient_any_visit",
+    "skilled_nursing_any_visit",
+    "long_term_care_any_visit",
+    "ed_visit_type_any_visit",
+    "ed_service_subcategory_any_visit",
+    "ed_revenue_code_any_visit"
+  )
+  missing_main_columns <- setdiff(required_main_columns, main_columns)
+  if (length(missing_main_columns) > 0L) {
+    stop(
+      "Enriched clinical-metrics table is missing required columns: ",
+      paste(missing_main_columns, collapse = ", ")
+    )
+  }
+
+  duplicate_check <- DBI::dbGetQuery(
+    con,
+    paste0(
+      "SELECT COUNT(*) - COUNT(DISTINCT patient_id || '|' || analysis_year::VARCHAR) ",
+      "AS duplicate_patient_year_rows FROM ",
+      main_identifier,
+      " WHERE analysis_year = ",
+      selected_analysis_year
+    )
+  )
+  if (duplicate_check$duplicate_patient_year_rows[[1]] != 0) {
+    stop("The enriched table contains duplicate 2022 patient-year rows.")
+  }
+
+  comparison_contract_qa <- DBI::dbGetQuery(
+    con,
+    paste0(
+      "SELECT 'overall eligibility flag is binary' AS check,\n",
+      "  SUM(CASE WHEN overall_comparison_eligible NOT IN (0, 1)\n",
+      "            OR overall_comparison_eligible IS NULL THEN 1 ELSE 0 END)::BIGINT AS observed\n",
+      "FROM ", main_identifier, " WHERE analysis_year = ", selected_analysis_year, "\n",
+      "UNION ALL\n",
+      "SELECT 'plan rows have one pooled Medicare segment and a valid plan group',\n",
+      "  SUM(CASE WHEN plan_comparison_eligible = 1\n",
+      "            AND (n_valid_medicare_segments <> 1\n",
+      "                 OR UPPER(TRIM(plan_comparison_group)) NOT IN ('MA', 'FFS'))\n",
+      "           THEN 1 ELSE 0 END)::BIGINT\n",
+      "FROM ", main_identifier, " WHERE analysis_year = ", selected_analysis_year, "\n",
+      "UNION ALL\n",
+      "SELECT 'nonmissing CFI scores have same-year non-inpatient evidence',\n",
+      "  SUM(CASE WHEN cfi_score IS NOT NULL\n",
+      "            AND has_same_year_non_inpatient_event <> 1 THEN 1 ELSE 0 END)::BIGINT\n",
+      "FROM ", main_identifier, " WHERE analysis_year = ", selected_analysis_year, "\n",
+      "UNION ALL\n",
+      "SELECT 'dual-coverage flag is binary',\n",
+      "  SUM(CASE WHEN has_medicare_medicaid_dual_coverage NOT IN (0, 1)\n",
+      "            OR has_medicare_medicaid_dual_coverage IS NULL THEN 1 ELSE 0 END)::BIGINT\n",
+      "FROM ", main_identifier, " WHERE analysis_year = ", selected_analysis_year
+    )
+  )
+  if (any(comparison_contract_qa$observed != 0)) {
+    stop("Comparison-table contract QA failed; inspect the configured analysis table.")
+  }
+
+  main_column <- function(column) {
+    quote_identifier_local(column)
+  }
+
+  if (comparison_mode == "overall") {
+    comparison_group_sql <- "'Komodo'"
+    eligibility_filter_sql <- paste0(
+      "AND ", main_column("overall_comparison_eligible"), " = 1"
+    )
+    expected_groups <- "Komodo"
+  } else {
+    comparison_group_sql <- paste0(
+      "CASE WHEN UPPER(TRIM(m.", main_column("plan_comparison_group"), ")) = 'MA' ",
+      "THEN 'Komodo MA' WHEN UPPER(TRIM(m.", main_column("plan_comparison_group"), ")) = 'FFS' ",
+      "THEN 'Komodo FFS' END"
+    )
+    eligibility_filter_sql <- paste0(
+      "AND ", main_column("plan_comparison_eligible"), " = 1 ",
+      "AND UPPER(TRIM(", main_column("plan_comparison_group"), ")) IN ('MA', 'FFS')"
+    )
+    expected_groups <- c("Komodo MA", "Komodo FFS")
+  }
+  base_cte <- paste0(
+    "WITH base AS (\n",
+    "  SELECT m.*, ",
+    comparison_group_sql,
+    " AS comparison_group\n",
+    "  FROM ",
+    main_identifier,
+    " m\n",
+    "  WHERE analysis_year = ",
+    selected_analysis_year,
+    "\n    ", eligibility_filter_sql,
+    ")"
+  )
+
+  group_denominators <- DBI::dbGetQuery(
+    con,
+    paste0(
+      base_cte,
+      "\nSELECT comparison_group, COUNT(*)::BIGINT AS n_eligible\n",
+      "FROM base\nGROUP BY comparison_group\nORDER BY comparison_group"
+    )
+  )
+  if (!all(expected_groups %in% group_denominators$comparison_group)) {
+    stop(
+      "The enriched table does not contain both required comparison groups. Found: ",
+      paste(group_denominators$comparison_group, collapse = ", ")
+    )
+  }
+  group_denominators <- group_denominators[
+    match(expected_groups, group_denominators$comparison_group),
+    ,
+    drop = FALSE
+  ]
+  age_group_expression <- paste0(
+    "CASE\n",
+    "  WHEN ", main_column("age"), " BETWEEN 65 AND 74 THEN '65-74'\n",
+    "  WHEN ", main_column("age"), " BETWEEN 75 AND 84 THEN '75-84'\n",
+    "  WHEN ", main_column("age"), " >= 85 THEN '85+'\n",
+    "  ELSE 'Unknown'\nEND"
+  )
+  sex_expression <- paste0(
+    "CASE\n",
+    "  WHEN UPPER(TRIM(", main_column("patient_gender"), ")) IN ('F', 'FEMALE') THEN 'Female'\n",
+    "  WHEN UPPER(TRIM(", main_column("patient_gender"), ")) IN ('M', 'MALE') THEN 'Male'\n",
+    "  ELSE 'Unknown'\nEND"
+  )
+  race_expression <- paste0(
+    "CASE\n",
+    "  WHEN UPPER(TRIM(", main_column("patient_race_ethnicity"), ")) = 'WHITE' THEN 'White'\n",
+    "  WHEN UPPER(TRIM(", main_column("patient_race_ethnicity"), ")) = 'BLACK OR AFRICAN AMERICAN' THEN 'Black or African American'\n",
+    "  WHEN UPPER(TRIM(", main_column("patient_race_ethnicity"), ")) = 'ASIAN OR PACIFIC ISLANDER' THEN 'Asian or Pacific Islander'\n",
+    "  WHEN UPPER(TRIM(", main_column("patient_race_ethnicity"), ")) = 'HISPANIC OR LATINO' THEN 'Hispanic or Latino'\n",
+    "  WHEN UPPER(TRIM(", main_column("patient_race_ethnicity"), ")) = 'OTHER' THEN 'Other'\n",
+    "  ELSE 'Unknown'\nEND"
+  )
+  region_expression <- paste0(
+    "COALESCE(NULLIF(TRIM(", main_column("census_region"), "), ''), 'Unknown')"
+  )
+  rurality_expression <- paste0(
+    "COALESCE(NULLIF(TRIM(", main_column("rurality_group"), "), ''), 'Unknown')"
+  )
+  cfi_expression <- paste0(
+    "CASE\n",
+    "  WHEN ", main_column("cfi_score"), " < 0.15 THEN 'Robust'\n",
+    "  WHEN ", main_column("cfi_score"), " < 0.25 THEN 'Prefrail'\n",
+    "  WHEN ", main_column("cfi_score"), " >= 0.25 THEN 'Frail'\n",
+    "  ELSE 'Unknown'\nEND"
+  )
+  gagne_expression <- paste0(
+    "CASE\n",
+    "  WHEN ", main_column("gagne_score"), " < 0 THEN '<0'\n",
+    "  WHEN ", main_column("gagne_score"), " = 0 THEN '0'\n",
+    "  WHEN ", main_column("gagne_score"), " BETWEEN 1 AND 2 THEN '1-2'\n",
+    "  WHEN ", main_column("gagne_score"), " BETWEEN 3 AND 5 THEN '3-5'\n",
+    "  WHEN ", main_column("gagne_score"), " >= 6 THEN '6+'\n",
+    "  ELSE 'Unknown'\nEND"
+  )
+  dual_eligibility_expression <- paste0(
+    "CASE\n",
+    "  WHEN ", main_column("has_medicare_medicaid_dual_coverage"), " = 1 THEN 'Yes'\n",
+    "  ELSE 'No'\nEND"
+  )
+
+  categorical_specs <- list(
+    age_group = list(
+      expression = age_group_expression,
+      categories = c("65-74", "75-84", "85+", "Unknown")
+    ),
+    sex = list(
+      expression = sex_expression,
+      categories = c("Female", "Male", "Unknown")
+    ),
+    race_ethnicity = list(
+      expression = race_expression,
+      categories = c(
+        "White", "Black or African American", "Asian or Pacific Islander",
+        "Hispanic or Latino", "Other", "Unknown"
+      )
+    ),
+    census_region = list(
+      expression = region_expression,
+      categories = c("Northeast", "Midwest", "South", "West")
+    ),
+    rurality = list(
+      expression = rurality_expression,
+      categories = c("Metro", "Urban", "Rural")
+    ),
+    cfi_category = list(
+      expression = cfi_expression,
+      categories = c("Robust", "Prefrail", "Frail")
+    ),
+    gagne_level = list(
+      expression = gagne_expression,
+      categories = c("<0", "0", "1-2", "3-5", "6+", "Unknown")
+    )
+  )
+  if (comparison_mode == "plans") {
+    categorical_specs$dual_eligibility <- list(
+      expression = dual_eligibility_expression,
+      categories = c("Yes", "No")
+    )
+  }
+  cfi_row_filter_sql <- paste0(
+    main_column("cfi_score"), " IS NOT NULL AND ",
+    main_column("has_same_year_non_inpatient_event"), " = 1"
+  )
+
+  run_categorical_query <- function(
+    variable,
+    expression,
+    categories,
+    row_filter_sql = NULL
+  ) {
+    from_sql <- if (is.null(row_filter_sql)) {
+      "FROM base"
+    } else {
+      paste0("FROM base WHERE ", row_filter_sql)
+    }
+    parts <- lapply(categories, function(category) {
+      numerator_sql <- paste0(
+        "SUM(CASE WHEN ", expression, " = ", sql_string_local(category),
+        " THEN 1 ELSE 0 END)"
+      )
+      paste0(
+        "SELECT comparison_group, ", sql_string_local(variable),
+        " AS variable, ", sql_string_local(category),
+        " AS category, COUNT(*)::BIGINT AS n_eligible,\n",
+        "  CASE WHEN ", numerator_sql, " BETWEEN 1 AND 10 THEN NULL ELSE ",
+        numerator_sql, " END::BIGINT AS category_n,\n",
+        "  CASE WHEN ", numerator_sql, " BETWEEN 1 AND 10 THEN NULL ELSE ",
+        numerator_sql, "::DOUBLE PRECISION / COUNT(*) END AS category_pct,\n",
+        "  CASE WHEN ", numerator_sql,
+        " BETWEEN 1 AND 10 THEN 'yes' ELSE 'no' END AS suppression_applied\n",
+        from_sql, "\nGROUP BY comparison_group"
+      )
+    })
+    DBI::dbGetQuery(
+      con,
+      paste0(
+        base_cte, "\n", paste(parts, collapse = "\nUNION ALL\n"),
+        "\nORDER BY comparison_group, category"
+      )
+    )
+  }
+
+  categorical_results <- do.call(
+    rbind,
+    lapply(names(categorical_specs), function(variable) {
+      spec <- categorical_specs[[variable]]
+      run_categorical_query(
+        variable,
+        spec$expression,
+        spec$categories,
+        row_filter_sql = if (variable == "cfi_category") {
+          cfi_row_filter_sql
+        } else {
+          NULL
+        }
+      )
+    })
+  )
+
+  ccw_parts <- lapply(seq_len(nrow(selected_ccw_conditions)), function(index) {
+    condition <- selected_ccw_conditions[index, , drop = FALSE]
+    flag_expression <- main_column(condition$indicator_column)
+    numerator_sql <- paste0(
+      "SUM(CASE WHEN ", flag_expression, " = 1 THEN 1 ELSE 0 END)"
+    )
+    paste0(
+      "SELECT comparison_group, ", sql_string_local(condition$condition_id),
+      " AS variable, 'Present' AS category, COUNT(*)::BIGINT AS n_eligible,\n",
+      "  CASE WHEN ", numerator_sql, " BETWEEN 1 AND 10 THEN NULL ELSE ",
+      numerator_sql, " END::BIGINT AS category_n,\n",
+      "  CASE WHEN ", numerator_sql, " BETWEEN 1 AND 10 THEN NULL ELSE ",
+      numerator_sql, "::DOUBLE PRECISION / COUNT(*) END AS category_pct,\n",
+      "  CASE WHEN ", numerator_sql,
+      " BETWEEN 1 AND 10 THEN 'yes' ELSE 'no' END AS suppression_applied\n",
+      "FROM base\nGROUP BY comparison_group"
+    )
+  })
+  categorical_results <- rbind(
+    categorical_results,
+    DBI::dbGetQuery(
+      con,
+      paste0(
+        base_cte, "\n", paste(ccw_parts, collapse = "\nUNION ALL\n"),
+        "\nORDER BY comparison_group, variable"
+      )
+    )
+  )
+
+  continuous_specs <- list(
+    age = list(column = "age", row_filter_sql = NULL),
+    cfi_score = list(column = "cfi_score", row_filter_sql = cfi_row_filter_sql),
+    gagne_score = list(column = "gagne_score", row_filter_sql = NULL)
+  )
+  continuous_parts <- lapply(names(continuous_specs), function(metric) {
+    spec <- continuous_specs[[metric]]
+    column_expression <- main_column(spec$column)
+    from_sql <- if (is.null(spec$row_filter_sql)) {
+      "FROM base"
+    } else {
+      paste0("FROM base WHERE ", spec$row_filter_sql)
+    }
+    paste0(
+      "SELECT comparison_group, ", sql_string_local(metric),
+      " AS metric, COUNT(", column_expression, ")::BIGINT AS n_nonmissing,\n",
+      "  CASE WHEN COUNT(", column_expression, ") BETWEEN 1 AND 10 THEN NULL ELSE AVG(",
+      column_expression, "::DOUBLE PRECISION) END AS mean_value,\n",
+      "  CASE WHEN COUNT(", column_expression, ") BETWEEN 1 AND 10 THEN NULL ELSE STDDEV_SAMP(",
+      column_expression, "::DOUBLE PRECISION) END AS sd_value,\n",
+      "  CASE WHEN COUNT(", column_expression, ") BETWEEN 1 AND 10 THEN NULL ELSE PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY ",
+      column_expression, ") END AS p25,\n",
+      "  CASE WHEN COUNT(", column_expression, ") BETWEEN 1 AND 10 THEN NULL ELSE PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY ",
+      column_expression, ") END AS median_value,\n",
+      "  CASE WHEN COUNT(", column_expression, ") BETWEEN 1 AND 10 THEN NULL ELSE PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY ",
+      column_expression, ") END AS p75,\n",
+      "  CASE WHEN COUNT(", column_expression, ") BETWEEN 1 AND 10 THEN 'yes' ELSE 'no' END AS suppression_applied\n",
+      from_sql, "\nGROUP BY comparison_group"
+    )
+  })
+  continuous_results <- DBI::dbGetQuery(
+    con,
+    paste0(
+      base_cte, "\n", paste(continuous_parts, collapse = "\nUNION ALL\n"),
+      "\nORDER BY comparison_group, metric"
+    )
+  )
+  continuous_results$iqr_value <- continuous_results$p75 - continuous_results$p25
+
+  utilization_specs <- data.frame(
+    category = c(
+      "Acute Inpatient",
+      "Skilled Nursing",
+      "Long-term care",
+      "Emergency department: visit type",
+      "Emergency department: service subcategory",
+      "Emergency department: revenue code"
+    ),
+    prefix = c(
+      "acute_inpatient",
+      "skilled_nursing",
+      "long_term_care",
+      "ed_visit_type",
+      "ed_service_subcategory",
+      "ed_revenue_code"
+    ),
+    report_label = c(
+      "Hospitalization",
+      "Skilled Nursing",
+      "Long-term care",
+      "Emergency department (visit type)",
+      "Emergency department (service subcategory)",
+      "Emergency department (revenue code)"
+    ),
+    stringsAsFactors = FALSE
+  )
+  utilization_prevalence_parts <- lapply(seq_len(nrow(utilization_specs)), function(index) {
+    item <- utilization_specs[index, , drop = FALSE]
+    any_visit_expression <- main_column(paste0(item$prefix, "_any_visit"))
+    numerator_sql <- paste0(
+      "SUM(CASE WHEN ", any_visit_expression, " = 1 THEN 1 ELSE 0 END)"
+    )
+    paste0(
+      "SELECT comparison_group, ", sql_string_local(item$category),
+      " AS utilization_category, COUNT(*)::BIGINT AS n_eligible,\n",
+      "  CASE WHEN ", numerator_sql, " BETWEEN 1 AND 10 THEN NULL ELSE ",
+      numerator_sql, " END::BIGINT AS n_patients_with_visit,\n",
+      "  CASE WHEN ", numerator_sql, " BETWEEN 1 AND 10 THEN NULL ELSE ",
+      numerator_sql, "::DOUBLE PRECISION / COUNT(*) END AS pct_patient_years_with_visit,\n",
+      "  CASE WHEN ", numerator_sql,
+      " BETWEEN 1 AND 10 THEN 'yes' ELSE 'no' END AS suppression_applied\n",
+      "FROM base\nGROUP BY comparison_group"
+    )
+  })
+  utilization_prevalence <- DBI::dbGetQuery(
+    con,
+    paste0(
+      base_cte, "\n", paste(utilization_prevalence_parts, collapse = "\nUNION ALL\n"),
+      "\nORDER BY comparison_group, utilization_category"
+    )
+  )
+
+  list(
+    group_denominators = group_denominators,
+    comparison_contract_qa = comparison_contract_qa,
+    categorical = categorical_results,
+    continuous = continuous_results,
+    utilization_prevalence = utilization_prevalence,
+    utilization_specs = utilization_specs
+  )
+}
+
+table_definitions <- list(
+  overall = list(label = "Overall population", comparison_mode = "overall"),
+  plans = list(label = "Medicare plan comparison", comparison_mode = "plans")
+)
+
+aggregate_inputs <- lapply(
+  table_definitions,
+  function(table_definition) {
+    run_aggregate_queries(table_definition$comparison_mode)
+  }
+)
+if ("dual_eligibility" %in% unique(aggregate_inputs$overall$categorical$variable)) {
+  stop("Overall Table 1 must not report dual eligibility.")
+}
+if (!"dual_eligibility" %in% unique(aggregate_inputs$plans$categorical$variable)) {
+  stop("Plan-specific Table 2 must report dual eligibility.")
+}
+utils::write.csv(
+  aggregate_inputs$overall$comparison_contract_qa,
+  file.path(result_output_dir, "3.1_2022_komodo_medicare_table1_contract_qa.csv"),
+  row.names = FALSE,
+  na = ""
+)
+
+render_table <- function(table_label, inputs, table_number, csv_stub) {
+  group_labels <- as.character(inputs$group_denominators$comparison_group)
+
+  get_category_row <- function(variable, category, group) {
+    rows <- inputs$categorical[
+      inputs$categorical$variable == variable &
+        inputs$categorical$category == category &
+        inputs$categorical$comparison_group == group,
+      ,
+      drop = FALSE
+    ]
+    if (nrow(rows) == 0L) return(NULL)
+    rows[1, , drop = FALSE]
+  }
+  category_cell <- function(variable, category, group) {
+    row <- get_category_row(variable, category, group)
+    if (is.null(row)) return("[suppressed]")
+    format_count_pct(row$category_n[[1]], row$category_pct[[1]])
+  }
+  get_continuous_row <- function(metric, group) {
+    rows <- inputs$continuous[
+      inputs$continuous$metric == metric &
+        inputs$continuous$comparison_group == group,
+      ,
+      drop = FALSE
+    ]
+    if (nrow(rows) == 0L) return(NULL)
+    rows[1, , drop = FALSE]
+  }
+  continuous_cell <- function(metric, group, mean_sd = TRUE, digits = 1L) {
+    row <- get_continuous_row(metric, group)
+    if (is.null(row)) return("[suppressed]")
+    format_continuous(row[1, , drop = FALSE], mean_sd = mean_sd, digits = digits)
+  }
+  category_values <- function(variable, category) {
+    vapply(
+      group_labels,
+      function(group) category_cell(variable, category, group),
+      character(1)
+    )
+  }
+  continuous_values <- function(metric, mean_sd = TRUE, digits = 1L) {
+    vapply(
+      group_labels,
+      function(group) continuous_cell(metric, group, mean_sd, digits),
+      character(1)
+    )
+  }
+
+  table_rows <- list()
+  append_row <- function(characteristic, values = rep("", length(group_labels))) {
+    table_rows[[length(table_rows) + 1L]] <<- make_row(
+      characteristic,
+      values,
+      group_labels
+    )
+  }
+  append_section <- function(label) {
+    append_row(paste0("<span class=\"section-label\"><strong>", label, "</strong></span>"))
+  }
+  append_subrow <- function(label, variable, category) {
+    append_row(
+      paste0("<span class=\"subrow\">", label, "</span>"),
+      category_values(variable, category)
+    )
+  }
+
+  append_section("Population and demographics")
+  append_row(
+    "Sample size, n",
+    vapply(
+      group_labels,
+      function(group) format_sample_size(
+        inputs$group_denominators$n_eligible[
+          inputs$group_denominators$comparison_group == group
+        ][1]
+      ),
+      character(1)
+    )
+  )
+  append_row("Age, years, mean (SD)", continuous_values("age"))
+  append_row("Age, years, median (IQR)", continuous_values("age", FALSE))
+  append_row("Age group, n (%)")
+  append_subrow("65-74 years", "age_group", "65-74")
+  append_subrow("75-84 years", "age_group", "75-84")
+  append_subrow("85 years or older", "age_group", "85+")
+  append_row("Sex, n (%)")
+  for (category in c("Female", "Male", "Unknown")) {
+    append_subrow(category, "sex", category)
+  }
+  append_row("Race/ethnicity, n (%)")
+  for (category in c("White", "Black or African American", "Asian or Pacific Islander", "Hispanic or Latino", "Other", "Unknown")) {
+    append_subrow(category, "race_ethnicity", category)
+  }
+  if ("dual_eligibility" %in% unique(inputs$categorical$variable)) {
+    append_row("Dual eligibility, n (%)")
+    append_subrow("Yes", "dual_eligibility", "Yes")
+  }
+  append_row("Census region, n (%)")
+  for (category in c("Northeast", "Midwest", "South", "West")) {
+    append_subrow(category, "census_region", category)
+  }
+  append_row("Residence rurality, n (%)")
+  for (category in c("Metro", "Urban", "Rural")) {
+    append_subrow(category, "rurality", category)
+  }
+
+  append_section("Clinical metrics")
+  append_row("CFI score, mean (SD)", continuous_values("cfi_score", TRUE, 2L))
+  append_row("CFI score, median (IQR)", continuous_values("cfi_score", FALSE, 2L))
+  append_row("CFI category, n (%)")
+  append_subrow("Robust (&lt;0.15)", "cfi_category", "Robust")
+  append_subrow("Prefrail (0.15-&lt;0.25)", "cfi_category", "Prefrail")
+  append_subrow("Frail (&gt;=0.25)", "cfi_category", "Frail")
+  append_row("Gagne score, mean (SD)", continuous_values("gagne_score"))
+  append_row("Gagne score, median (IQR)", continuous_values("gagne_score", FALSE))
+  append_row("Gagne level, n (%)")
+  for (category in c("<0", "0", "1-2", "3-5", "6+")) {
+    append_subrow(if (category == "<0") "&lt;0" else category, "gagne_level", category)
+  }
+
+  append_row("Selected CCW conditions, n (%)")
+  for (index in seq_len(nrow(selected_ccw_conditions))) {
+    condition <- selected_ccw_conditions[index, , drop = FALSE]
+    append_subrow(condition$label, condition$condition_id, "Present")
+  }
+
+  append_section("Healthcare utilization")
+  for (index in seq_len(nrow(inputs$utilization_specs))) {
+    utilization <- inputs$utilization_specs[index, , drop = FALSE]
+    prevalence_cells <- vapply(
+      group_labels,
+      function(group) {
+        rows <- inputs$utilization_prevalence[
+          inputs$utilization_prevalence$utilization_category == utilization$category &
+            inputs$utilization_prevalence$comparison_group == group,
+          ,
+          drop = FALSE
+        ]
+        if (nrow(rows) == 0L) return("[suppressed]")
+        format_count_pct(
+          rows$n_patients_with_visit[[1]],
+          rows$pct_patient_years_with_visit[[1]]
+        )
+      },
+      character(1)
+    )
+    append_row(
+      paste0(utilization$report_label, ", n (%)"),
+      prevalence_cells
+    )
+  }
+
+  table_output <- do.call(rbind, table_rows)
+  table_csv_path <- file.path(
+    result_output_dir,
+    paste0("3.1_2022_komodo_medicare_table1_", csv_stub, ".csv")
+  )
+  utils::write.csv(table_output, table_csv_path, row.names = FALSE, na = "")
+  list(
+    title = paste0(
+      "Table ", table_number,
+      ". Characteristics of older adults (65+) in Komodo, 2022 (",
+      table_label,
+      ")"
+    ),
+    data = table_output
+  )
+}
+
+rendered_tables <- list(
+  render_table("Overall population", aggregate_inputs$overall, "1", "overall"),
+  render_table("Medicare plan comparison", aggregate_inputs$plans, "2", "plans")
+)
+```
+
+```{r table1, results='asis'}
+cat(
+  "<style>",
+  ".table1 { width: 85%; table-layout: fixed; margin: 0 auto 2rem; font-size: 12px; }",
+  ".table1 caption { font-size: 12px; font-weight: 700; }",
+  ".table1 > thead > tr > th { font-weight: 700; }",
+  ".table1 > tbody > tr > td { padding: 4px 6px; vertical-align: middle; }",
+  ".table1 td:first-child, .table1 th:first-child { width: 42%; text-align: left; overflow-wrap: anywhere; }",
+  ".table1 td:not(:first-child), .table1 th:not(:first-child) { text-align: center; white-space: nowrap; }",
+  ".table1 .section-label { font-size: 12px; font-weight: 700; }",
+  ".table1 .subrow { padding-left: 1.25rem; }",
+  "</style>",
+  sep = "\n"
+)
+for (table in rendered_tables) {
+  cat(
+    knitr::kable(
+      table$data,
+      format = "html",
+      caption = table$title,
+      row.names = FALSE,
+      escape = FALSE,
+      table.attr = 'class="table table-striped table-condensed table1"',
+      align = c("l", rep("c", ncol(table$data) - 1L))
+    ),
+    "\n",
+    sep = ""
+  )
+}
+cat(
+  '<p class="table-note">Categorical and utilization values are shown as n (%) of eligible patient-years. CFI summaries use the separate denominator of patient-years with a nonmissing CFI score and at least one same-year non-inpatient event. Counts and percentages from 1 through 10 are suppressed.</p>',
+  sep = "\n"
+)
+```
