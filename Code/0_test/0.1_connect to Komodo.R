@@ -19,7 +19,7 @@ keyring::key_get("db_username")
 keyring::key_set("atlas_username", prompt = "Atlas username")
 keyring::key_set("atlas_password", prompt = "Atlas password")
 
-komodo_schema <- "komodo_ext"
+komodo_schema <- "komodo_202606"
 write_schema <- paste0("work_", keyring::key_get("db_username"))
 
 Sys.setenv(
@@ -41,10 +41,10 @@ options(schema.default.value = komodo_schema)
 options(write_schema.default.value = write_schema)
 
 # test if connecting successfully
-tbl(
-  con,
-  inDatabaseSchema(komodo_schema, "patient_demographics")
-) |>
-  head() |>
-  collect()
+#tbl(
+#  con,
+#  inDatabaseSchema(komodo_schema, "patient_demographics")
+#) |>
+#  head() |>
+#  collect()
 

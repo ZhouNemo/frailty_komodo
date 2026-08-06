@@ -3,7 +3,7 @@ source("Code/2_variable construction/3.0_normalized_clinical_metrics_helpers.R")
 # Project: Frailty_Komoto normalized annual clinical metrics QA
 # Author: Nemo Zhou
 # Date started: 2026-06-30
-# Date last updated: 2026-07-16
+# Date last updated: 2026-08-06
 #
 # ---- Purpose ----
 # Run aggregate QA for the normalized 3.x clinical-metrics pipeline. The checks
@@ -26,6 +26,7 @@ procedure_presence_identifier <- qualified_identifier(write_schema, config$proce
 hiv_evidence_identifier <- qualified_identifier(write_schema, config$hiv_evidence_table)
 cfi_matches_identifier <- qualified_identifier(write_schema, config$cfi_feature_matches_table)
 ccw_matches_identifier <- qualified_identifier(write_schema, config$ccw_feature_matches_table)
+ccw_long_identifier <- qualified_identifier(write_schema, config$ccw_conditions_long_table)
 gagne_matches_identifier <- qualified_identifier(write_schema, config$gagne_feature_matches_table)
 cfi_scores_identifier <- qualified_identifier(write_schema, config$cfi_scores_table)
 ccw_indicators_identifier <- qualified_identifier(write_schema, config$ccw_condition_indicators_table)
@@ -55,6 +56,7 @@ required_write_tables <- c(
   config$hiv_evidence_table,
   config$cfi_feature_matches_table,
   config$ccw_feature_matches_table,
+  config$ccw_conditions_long_table,
   config$gagne_feature_matches_table,
   config$cfi_scores_table,
   config$ccw_condition_indicators_table,
@@ -77,6 +79,43 @@ if (length(missing_write_tables) > 0L) {
     write_schema,
     ": ",
     paste(missing_write_tables, collapse = ", ")
+  )
+}
+
+if (identical(config$ccw_algorithm, "ccw30_normalized")) {
+  table_has_columns(
+    con, write_schema, config$ccw_feature_matches_table,
+    c("patid", "patient_id", "analysis_year", "feature_id", "event_date", "source_table", "claim_setting", "dx_code", "match_type")
+  )
+  table_has_columns(
+    con, write_schema, config$ccw_condition_indicators_table,
+    c(
+      "patid", "patient_id", "analysis_year", "ccw_condition_count", "ccw_cancer",
+      "ccw_acute_myocardial_infarction", "ccw_diabetes", "ccw_heart_failure",
+      "ccw_hypertension", "ccw_ischemic_heart_disease", "ccw_alzheimers_disease",
+      "ccw_chronic_kidney_disease", "ccw_copd", "ccw_depressive_mood_disorders",
+      "ccw_hip_and_pelvic_fracture"
+    )
+  )
+  table_has_columns(
+    con, write_schema, config$ccw_group_counts_table,
+    c("patid", "patient_id", "analysis_year", "ccw_total_condition_count", "lookup_version")
+  )
+  ccw_group_columns <- tolower(names(DBI::dbGetQuery(
+    con,
+    paste0("SELECT * FROM ", ccw_groups_identifier, " LIMIT 0")
+  )))
+  if (length(grep("^index_", ccw_group_columns, value = TRUE)) > 0L) {
+    stop("CCW-30 total-count table must not contain fabricated index_* group columns.")
+  }
+  table_has_columns(
+    con, write_schema, config$final_table,
+    c(
+      "ccw_total_condition_count", "ccw_cancer", "ccw_acute_myocardial_infarction",
+      "ccw_diabetes", "ccw_heart_failure", "ccw_hypertension", "ccw_ischemic_heart_disease",
+      "ccw_alzheimers_disease", "ccw_chronic_kidney_disease", "ccw_copd",
+      "ccw_depressive_mood_disorders", "ccw_hip_and_pelvic_fracture"
+    )
   )
 }
 
@@ -144,6 +183,44 @@ qa_results$feature_matches <- DBI::dbGetQuery(
   )
 )
 
+if (identical(config$ccw_algorithm, "ccw30_normalized")) {
+  qa_results$ccw30_hiv_evidence_by_setting <- DBI::dbGetQuery(
+    con,
+    paste0(
+      "SELECT 'CCW30' AS metric, source_table, claim_setting, COUNT(*)::BIGINT AS evidence_rows\n",
+      "FROM ", ccw_matches_identifier, "\n",
+      "WHERE analysis_year IN (", sql_values(config$analysis_years), ")\n",
+      "GROUP BY source_table, claim_setting\n",
+      "UNION ALL\n",
+      "SELECT 'HIV' AS metric, NULL::VARCHAR(64) AS source_table, claim_setting, COUNT(*)::BIGINT AS evidence_rows\n",
+      "FROM ", hiv_evidence_identifier, "\n",
+      "WHERE analysis_year IN (", sql_values(config$analysis_years), ")\n",
+      "GROUP BY claim_setting\n",
+      "ORDER BY metric, source_table, claim_setting"
+    )
+  )
+  qa_results$ccw30_qualification <- DBI::dbGetQuery(
+    con,
+    paste0(
+      "SELECT qualification_group, COUNT(*)::BIGINT AS qualified_conditions\n",
+      "FROM ", ccw_long_identifier, "\n",
+      "WHERE analysis_year IN (", sql_values(config$analysis_years), ")\n",
+      "GROUP BY qualification_group\nORDER BY qualification_group"
+    )
+  )
+  qa_results$ccw30_total_integrity <- DBI::dbGetQuery(
+    con,
+    paste0(
+      "SELECT COUNT(*)::BIGINT AS rows,\n",
+      "       SUM(CASE WHEN ind.ccw_condition_count = totals.ccw_total_condition_count THEN 0 ELSE 1 END)::BIGINT AS unequal_counts\n",
+      "FROM ", ccw_indicators_identifier, " ind\n",
+      "INNER JOIN ", ccw_groups_identifier, " totals\n",
+      "  ON ind.patid = totals.patid AND ind.analysis_year = totals.analysis_year\n",
+      "WHERE ind.analysis_year IN (", sql_values(config$analysis_years), ")"
+    )
+  )
+}
+
 qa_results$final_completeness <- DBI::dbGetQuery(
   con,
   paste0(
@@ -155,7 +232,11 @@ qa_results$final_completeness <- DBI::dbGetQuery(
        COUNT(ccw_group.patid)::BIGINT AS ccw_group_rows,
        COUNT(gagne.patid)::BIGINT AS gagne_rows,
        COUNT(hiv.patid)::BIGINT AS hiv_rows,
-       COUNT(final.patid)::BIGINT AS final_rows
+       COUNT(final.patid)::BIGINT AS final_rows,
+       (SELECT COUNT(*)::BIGINT
+        FROM ", cfi_scores_identifier, " source_cfi
+         WHERE source_cfi.analysis_year = ids.analysis_year
+       ) AS cfi_source_rows
      FROM ", ids_identifier, " ids
      LEFT JOIN ", cfi_scores_identifier, " cfi
        ON ids.patid = cfi.patid AND ids.analysis_year = cfi.analysis_year
@@ -178,7 +259,13 @@ qa_results$final_completeness <- DBI::dbGetQuery(
 qa_results$duplicates <- DBI::dbGetQuery(
   con,
   paste0(
-    "SELECT 'procedure_code_presence' AS qa_check,
+    "SELECT 'cfi_scores' AS qa_check,
+       COUNT(*) - COUNT(DISTINCT patid || '|' || analysis_year::VARCHAR)
+         AS duplicate_rows
+     FROM ", cfi_scores_identifier, "
+     WHERE analysis_year IN (", sql_values(config$analysis_years), ")
+     UNION ALL
+     SELECT 'procedure_code_presence' AS qa_check,
        COUNT(*) - COUNT(DISTINCT patid || '|' || analysis_year::VARCHAR || '|' || procedure_code)
          AS duplicate_rows
      FROM ", procedure_presence_identifier, "
@@ -200,13 +287,15 @@ qa_results$hiv_consistency <- DBI::dbGetQuery(
        SUM(CASE
          WHEN hiv_status = 1
           AND hiv_inpatient_evidence = 0
-          AND hiv_non_inpatient_second_date IS NULL
+          AND hiv_non_inpatient_distinct_dates < ",
+    config$hiv_non_inpatient_min_distinct_dates, "
          THEN 1 ELSE 0 END)::BIGINT AS invalid_positive_hiv_rows,
        SUM(CASE
          WHEN hiv_status = 0
           AND (
             hiv_inpatient_evidence = 1
-            OR hiv_non_inpatient_second_date IS NOT NULL
+            OR hiv_non_inpatient_distinct_dates >= ",
+    config$hiv_non_inpatient_min_distinct_dates, "
           )
          THEN 1 ELSE 0 END)::BIGINT AS invalid_negative_hiv_rows
      FROM ", hiv_status_identifier, "
@@ -223,7 +312,11 @@ for (name in names(qa_results)) {
 
 final_completeness <- qa_results$final_completeness
 if (
-  any(final_completeness$denominator_rows != final_completeness$cfi_rows) ||
+  (config$calculate_cfi &&
+    any(final_completeness$denominator_rows != final_completeness$cfi_rows)) ||
+    (!config$calculate_cfi &&
+      any(final_completeness$cfi_rows != final_completeness$cfi_source_rows)) ||
+    any(final_completeness$cfi_rows > final_completeness$denominator_rows) ||
     any(final_completeness$denominator_rows != final_completeness$ccw_indicator_rows) ||
     any(final_completeness$denominator_rows != final_completeness$ccw_group_rows) ||
     any(final_completeness$denominator_rows != final_completeness$gagne_rows) ||
@@ -235,6 +328,11 @@ if (
 
 if (any(qa_results$duplicates$duplicate_rows != 0)) {
   stop("Normalized pipeline duplicate checks failed.")
+}
+
+if (identical(config$ccw_algorithm, "ccw30_normalized") &&
+    qa_results$ccw30_total_integrity$unequal_counts[[1]] != 0) {
+  stop("CCW-30 total condition counts do not equal the 30-base-condition indicators.")
 }
 
 if (

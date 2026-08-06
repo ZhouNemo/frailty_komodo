@@ -8,7 +8,7 @@ source("Code/2_variable construction/3.0_normalized_clinical_metrics_helpers.R")
 # ---- Purpose ----
 # Provide shared configuration, date-window helpers, transaction-filter guards,
 # and local file paths for the 5.x annual polypharmacy pipeline. The pipeline
-# reuses `2_annual_metric_ids`, reads `komodo_ext.pharmacy_events`, stages a
+# reuses `2_annual_metric_ids`, reads `komodo_202606.pharmacy_events`, stages a
 # versioned NDC11-to-ATC crosswalk, and builds annual patient-year
 # polypharmacy metrics. This helper file does not create Redshift tables on its
 # own.

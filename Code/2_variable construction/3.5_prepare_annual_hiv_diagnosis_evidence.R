@@ -3,14 +3,14 @@ source("Code/2_variable construction/3.0_normalized_clinical_metrics_helpers.R")
 # Project: Frailty_Komoto normalized annual clinical metrics
 # Author: Nemo Zhou
 # Date started: 2026-06-30
-# Date last updated: 2026-07-16
+# Date last updated: 2026-07-31
 #
 # ---- Purpose ----
 # Build compact annual HIV diagnosis evidence from
-# komodo_ext.normalized_dx_events. HIV is the only current clinical metric that
+# komodo_202606.normalized_dx_events. HIV is the only current clinical metric that
 # needs event date and inpatient/non-inpatient setting after code matching. This
 # script retains only HIV diagnosis evidence and writes selected years to:
-#   - 2_annual_hiv_diagnosis_evidence
+#   - 2_2022_komodo_medicare_comparison_hiv_diagnosis_evidence
 
 config <- get_normalized_clinical_metrics_config()
 con <- connect_komodo()

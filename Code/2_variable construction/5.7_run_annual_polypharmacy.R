@@ -21,7 +21,7 @@
 #
 # ---- Reviewed transaction filter ----
 # A 2016 exploratory unfiltered run of `5.1` surfaced the distinct pharmacy
-# transaction values in `komodo_ext.pharmacy_events` (no NULL/blank buckets):
+# transaction values in `komodo_202606.pharmacy_events` (no NULL/blank buckets):
 #   transaction_result:      PAID / REJECTED / REVERSED
 #   transaction_status:      STANDALONE / FINAL
 #   transaction_source_type: PAID ONLY / LIFECYCLE

@@ -11,7 +11,7 @@ library(DBI)
 # Date last updated: 2026-07-16
 #
 # ---- Purpose ----
-# Quick logic check for Code/1_eligbility/1.1_build_annual_eligible_population.R.
+# Quick logic check for Code/1_eligbility/Old/1.1_build_annual_eligible_population.R.
 # This script intentionally samples a small candidate patient set before the
 # full insurance-attribution logic. Use it only to validate syntax, joins, date
 # logic, and aggregate QA output before running the full 1.1 build. Do not use
@@ -23,14 +23,14 @@ library(DBI)
 #   Documents/03_PATIENT_CLOSED_AND_INSURANCE_STRUCTURE.md
 #
 # Run before:
-#   Code/1_eligbility/1.1_build_annual_eligible_population.R
+#   Code/1_eligbility/Old/1.1_build_annual_eligible_population.R
 
 # ---- Connection settings ----
 Sys.setenv(
   "DATABASECONNECTOR_JAR_FOLDER" = "D:/Users/xia.zhou/Documents/JDBC Driver"
 )
 
-komodo_schema <- "komodo_ext"
+komodo_schema <- "komodo_202606"
 write_schema <- paste0("work_", keyring::key_get("db_username"))
 
 # ---- Quick-check parameters ----

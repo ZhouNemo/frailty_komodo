@@ -1,0 +1,650 @@
+---
+title: "Annual Healthcare Utilization"
+author: "Nemo Zhou"
+date: "2026-07-17"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+params:
+  analysis_year: 2022
+  utilization_output_dir: null
+---
+
+<!--
+Project: Frailty_Komoto annual healthcare-utilization visualization
+Author: Nemo Zhou
+Date started: 2026-07-17
+Date last updated: 2026-07-17
+
+Purpose:
+This CSV-only R Markdown report visualizes aggregate annual healthcare-
+utilization outputs created by
+Code/2_variable construction/6.4_describe_annual_healthcare_utilization.R.
+It does not connect to Redshift. Visit prevalence is shown as the number and
+percentage of eligible patient-years with at least one visit. Duration plots
+use aggregate duration frequencies, so no patient-level or utilization-level
+rows are loaded locally.
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 12,
+  fig.height = 7
+)
+
+library(ggplot2)
+library(knitr)
+```
+
+```{r helpers}
+selected_analysis_year <- as.integer(params$analysis_year)
+if (
+  length(selected_analysis_year) != 1L ||
+    is.na(selected_analysis_year) ||
+    selected_analysis_year != 2022L
+) {
+  stop("Set params$analysis_year to 2022 for this fixed utilization workflow.")
+}
+
+if (!is.null(params$utilization_output_dir) && nzchar(params$utilization_output_dir)) {
+  requested_output_dir <- params$utilization_output_dir
+  output_dir_candidates <- c(
+    requested_output_dir,
+    file.path("..", requested_output_dir),
+    file.path("..", "..", requested_output_dir),
+    file.path("..", "..", "..", requested_output_dir)
+  )
+} else {
+  output_dir_candidates <- c(
+    file.path("Outputs", paste0("6.x_annual_healthcare_utilization_", selected_analysis_year)),
+    file.path("..", "Outputs", paste0("6.x_annual_healthcare_utilization_", selected_analysis_year)),
+    file.path("..", "..", "Outputs", paste0("6.x_annual_healthcare_utilization_", selected_analysis_year))
+  )
+}
+
+output_dir <- output_dir_candidates[dir.exists(output_dir_candidates)][1]
+if (is.null(output_dir) || is.na(output_dir) || !dir.exists(output_dir)) {
+  stop(
+    "Could not find the healthcare-utilization output directory. Run ",
+    "Code/2_variable construction/6.4_describe_annual_healthcare_utilization.R first."
+  )
+}
+
+read_required_csv <- function(file_name) {
+  path <- file.path(output_dir, file_name)
+  if (!file.exists(path)) {
+    stop(
+      "Missing required file: ", path,
+      ". Run Code/2_variable construction/6.4_describe_annual_healthcare_utilization.R first."
+    )
+  }
+  utils::read.csv(path, stringsAsFactors = FALSE, check.names = FALSE)
+}
+
+summary_required_columns <- c(
+  "analysis_year", "stratification", "stratum_value", "utilization_category",
+  "n_eligible_patient_years", "n_patients_with_visit",
+  "pct_patient_years_with_visit", "n_visits", "duration_n",
+  "duration_missing_n", "duration_missing_pct", "duration_mean_days",
+  "duration_sd_days", "duration_min_days", "duration_p25_days",
+  "duration_median_days", "duration_p75_days", "duration_max_days",
+  "duration_iqr_days", "suppression_applied"
+)
+distribution_required_columns <- c(
+  "analysis_year", "stratification", "stratum_value", "utilization_category",
+  "duration_days", "n_duration_events", "suppression_applied"
+)
+
+validate_columns <- function(data, data_name, columns) {
+  missing_columns <- setdiff(columns, names(data))
+  if (length(missing_columns) > 0L) {
+    stop(
+      data_name, " is missing required columns: ",
+      paste(missing_columns, collapse = ", ")
+    )
+  }
+}
+
+coerce_numeric_columns <- function(data, columns) {
+  for (column in intersect(columns, names(data))) {
+    data[[column]] <- suppressWarnings(as.numeric(data[[column]]))
+  }
+  data
+}
+
+filter_to_analysis_year <- function(data, data_name) {
+  data$analysis_year <- suppressWarnings(as.integer(data$analysis_year))
+  filtered <- data[data$analysis_year == selected_analysis_year, , drop = FALSE]
+  if (nrow(filtered) == 0L) {
+    stop(data_name, " does not contain analysis_year = ", selected_analysis_year, ".")
+  }
+  filtered
+}
+
+category_order <- c(
+  "Acute Inpatient",
+  "Hospice (Inpatient)",
+  "Skilled Nursing",
+  "IPF",
+  "Emergency Department"
+)
+
+stratification_order <- c(
+  "overall",
+  "mx_insurance_group",
+  "mx_insurance_segment",
+  "age_group",
+  "sex",
+  "cfi_level"
+)
+
+stratification_labels <- c(
+  overall = "Overall Komodo",
+  mx_insurance_group = "Insurance plan",
+  mx_insurance_segment = "Insurance segment",
+  age_group = "Age group",
+  sex = "Sex",
+  cfi_level = "CFI level"
+)
+
+utilization_palette <- c(
+  "Acute Inpatient" = "#2E86AB",
+  "Hospice (Inpatient)" = "#7D5BA6",
+  "Skilled Nursing" = "#3F7C85",
+  "IPF" = "#A44A3F",
+  "Emergency Department" = "#F2B134"
+)
+
+ordered_stratum_values <- function(values, stratification) {
+  values <- unique(as.character(values))
+  values <- values[!is.na(values)]
+  if (stratification == "overall") {
+    return("Komodo")
+  }
+  if (stratification == "age_group") {
+    preferred <- c("40-49", "50-64", "65-74", "75-84", "85+", "Unknown")
+    return(c(intersect(preferred, values), setdiff(sort(values), preferred)))
+  }
+  if (stratification == "cfi_level") {
+    preferred <- c("Robust", "Prefrail", "Frail", "Unknown")
+    return(c(intersect(preferred, values), setdiff(sort(values), preferred)))
+  }
+  c(sort(setdiff(values, "Unknown")), if ("Unknown" %in% values) "Unknown")
+}
+
+prepare_summary <- function(data, data_name) {
+  validate_columns(data, data_name, summary_required_columns)
+  data <- filter_to_analysis_year(data, data_name)
+  data <- coerce_numeric_columns(
+    data,
+    c(
+      "analysis_year", "n_eligible_patient_years", "n_patients_with_visit",
+      "pct_patient_years_with_visit", "n_visits", "duration_n",
+      "duration_missing_n", "duration_missing_pct", "duration_mean_days",
+      "duration_sd_days", "duration_min_days", "duration_p25_days",
+      "duration_median_days", "duration_p75_days", "duration_max_days",
+      "duration_iqr_days"
+    )
+  )
+  data <- data[data$stratification %in% stratification_order, , drop = FALSE]
+  data$utilization_category <- factor(
+    data$utilization_category,
+    levels = category_order
+  )
+  data
+}
+
+prepare_distribution <- function(data) {
+  validate_columns(data, "duration distribution", distribution_required_columns)
+  data <- filter_to_analysis_year(data, "duration distribution")
+  data <- coerce_numeric_columns(data, c("duration_days", "n_duration_events"))
+  data <- data[
+    data$suppression_applied != "yes" &
+      !is.na(data$duration_days) &
+      !is.na(data$n_duration_events) &
+      data$n_duration_events >= 11,
+    ,
+    drop = FALSE
+  ]
+  data$utilization_category <- factor(
+    data$utilization_category,
+    levels = category_order
+  )
+  data
+}
+
+overall_inputs <- prepare_summary(
+  read_required_csv(
+    paste0("6.4_healthcare_utilization_summary_", selected_analysis_year, ".csv")
+  ),
+  "overall utilization summary"
+)
+subgroup_inputs <- prepare_summary(
+  read_required_csv(
+    paste0(
+      "6.4_healthcare_utilization_summary_by_subgroup_",
+      selected_analysis_year,
+      ".csv"
+    )
+  ),
+  "subgroup utilization summary"
+)
+summary_inputs <- rbind(overall_inputs, subgroup_inputs)
+
+duration_inputs <- prepare_distribution(
+  read_required_csv(
+    paste0(
+      "6.4_healthcare_utilization_duration_distribution_",
+      selected_analysis_year,
+      ".csv"
+    )
+  )
+)
+
+observed_stratifications <- unique(summary_inputs$stratification)
+missing_stratifications <- setdiff(stratification_order, observed_stratifications)
+if (length(missing_stratifications) > 0L) {
+  stop(
+    "Summary inputs are missing requested stratifications: ",
+    paste(missing_stratifications, collapse = ", ")
+  )
+}
+
+format_value <- function(value, digits = 1) {
+  ifelse(is.na(value), "Suppressed", formatC(value, format = "f", digits = digits))
+}
+
+format_n_pct <- function(n, pct) {
+  ifelse(
+    is.na(n) | is.na(pct),
+    "Suppressed",
+    paste0(formatC(n, format = "f", digits = 0, big.mark = ","),
+           " (", formatC(pct, format = "f", digits = 1), "%)")
+  )
+}
+
+format_mean_sd <- function(mean, sd) {
+  ifelse(
+    is.na(mean),
+    "Suppressed",
+    paste0(format_value(mean), " (", format_value(sd), ")")
+  )
+}
+
+format_median_iqr <- function(median, iqr) {
+  ifelse(
+    is.na(median),
+    "Suppressed",
+    paste0(format_value(median), " (", format_value(iqr), ")")
+  )
+}
+
+make_statistics_table <- function(data, stratification, utilization_category = NULL) {
+  table_data <- data[data$stratification == stratification, , drop = FALSE]
+  if (!is.null(utilization_category)) {
+    table_data <- table_data[
+      table_data$utilization_category == utilization_category,
+      ,
+      drop = FALSE
+    ]
+  }
+  if (nrow(table_data) == 0L) {
+    return(NULL)
+  }
+  table_data$stratum_value <- factor(
+    table_data$stratum_value,
+    levels = ordered_stratum_values(table_data$stratum_value, stratification)
+  )
+  table_data <- table_data[order(table_data$stratum_value, table_data$utilization_category), , drop = FALSE]
+  output <- data.frame(
+    Patients = format_n_pct(
+      table_data$n_patients_with_visit,
+      table_data$pct_patient_years_with_visit
+    ),
+    `Mean (SD) days` = format_mean_sd(
+      table_data$duration_mean_days,
+      table_data$duration_sd_days
+    ),
+    `Median (IQR) days` = format_median_iqr(
+      table_data$duration_median_days,
+      table_data$duration_iqr_days
+    ),
+    `Min days` = format_value(table_data$duration_min_days),
+    `Max days` = format_value(table_data$duration_max_days),
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  if (stratification == "overall") {
+    output <- cbind(
+      `Visit type` = as.character(table_data$utilization_category),
+      output
+    )
+  } else {
+    output <- cbind(
+      Subgroup = as.character(table_data$stratum_value),
+      output
+    )
+  }
+  knitr::kable(output, align = c("l", "r", "r", "r", "r", "r"))
+}
+
+plot_prevalence <- function(data, stratification, utilization_category = NULL) {
+  plot_data <- data[data$stratification == stratification, , drop = FALSE]
+  if (!is.null(utilization_category)) {
+    plot_data <- plot_data[
+      plot_data$utilization_category == utilization_category,
+      ,
+      drop = FALSE
+    ]
+  }
+  plot_data <- plot_data[!is.na(plot_data$pct_patient_years_with_visit), , drop = FALSE]
+  if (nrow(plot_data) == 0L) {
+    return(NULL)
+  }
+  if (stratification == "overall") {
+    plot_data$plot_x <- factor(
+      plot_data$utilization_category,
+      levels = category_order
+    )
+  } else {
+    plot_data$plot_x <- factor(
+      plot_data$stratum_value,
+      levels = ordered_stratum_values(plot_data$stratum_value, stratification)
+    )
+  }
+  plot_data$plot_label <- format_n_pct(
+    plot_data$n_patients_with_visit,
+    plot_data$pct_patient_years_with_visit
+  )
+
+  ggplot(
+    plot_data,
+    aes(x = plot_x, y = pct_patient_years_with_visit, fill = utilization_category)
+  ) +
+    geom_col(
+      position = position_dodge(width = 0.82),
+      width = 0.75,
+      color = "white",
+      linewidth = 0.15
+    ) +
+    geom_text(
+      aes(label = plot_label),
+      position = position_dodge(width = 0.82),
+      vjust = -0.25,
+      size = 3.5,
+      angle = 45,
+      hjust = 0
+    ) +
+    scale_y_continuous(
+      labels = function(x) paste0(formatC(x, format = "f", digits = 1), "%"),
+      expand = expansion(mult = c(0, 0.24))
+    ) +
+    scale_x_discrete(labels = function(x) {
+      vapply(
+        x,
+        function(value) paste(strwrap(value, width = 14), collapse = "\n"),
+        character(1)
+      )
+    }) +
+    scale_fill_manual(values = utilization_palette, drop = FALSE) +
+    labs(
+      title = if (stratification == "overall") {
+        "Overall visit prevalence in Komodo"
+      } else {
+        paste(
+          utilization_category,
+          "prevalence by",
+          stratification_labels[[stratification]]
+        )
+      },
+      x = if (stratification == "overall") "Visit type" else stratification_labels[[stratification]],
+      y = "Eligible patient-years with at least one visit",
+      fill = "Visit type"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.text.x = element_text(size = 11, angle = 35, hjust = 1),
+      axis.text.y = element_text(size = 11),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 15, face = "bold"),
+      panel.grid.major.x = element_blank(),
+      strip.text = element_text(face = "bold")
+    ) +
+    guides(fill = "none")
+}
+
+plot_duration_box <- function(summary_data, distribution_data, stratification, utilization_category = NULL) {
+  box_data <- summary_data[summary_data$stratification == stratification, , drop = FALSE]
+  point_data <- distribution_data[
+    distribution_data$stratification == stratification,
+    ,
+    drop = FALSE
+  ]
+  if (!is.null(utilization_category)) {
+    box_data <- box_data[
+      box_data$utilization_category == utilization_category,
+      ,
+      drop = FALSE
+    ]
+    point_data <- point_data[
+      point_data$utilization_category == utilization_category,
+      ,
+      drop = FALSE
+    ]
+  }
+  box_data <- box_data[
+    !is.na(box_data$duration_min_days) &
+      !is.na(box_data$duration_p25_days) &
+      !is.na(box_data$duration_median_days) &
+      !is.na(box_data$duration_p75_days) &
+      !is.na(box_data$duration_max_days),
+    ,
+    drop = FALSE
+  ]
+  if (nrow(box_data) == 0L) {
+    return(NULL)
+  }
+  if (stratification == "overall") {
+    box_data$plot_x <- factor(box_data$utilization_category, levels = category_order)
+    point_data$plot_x <- factor(point_data$utilization_category, levels = category_order)
+  } else {
+    stratum_levels <- ordered_stratum_values(box_data$stratum_value, stratification)
+    box_data$plot_x <- factor(box_data$stratum_value, levels = stratum_levels)
+    point_data$plot_x <- factor(point_data$stratum_value, levels = stratum_levels)
+  }
+  box_data$median_label <- paste0("Median = ", format_value(box_data$duration_median_days))
+  box_data$q1_label <- paste0("Q1 = ", format_value(box_data$duration_p25_days))
+  box_data$q3_label <- paste0("Q3 = ", format_value(box_data$duration_p75_days))
+
+  box_plot <- ggplot(
+    box_data,
+    aes(x = plot_x, color = utilization_category, fill = utilization_category)
+  ) +
+    geom_boxplot(
+      aes(
+        ymin = duration_min_days,
+        lower = duration_p25_days,
+        middle = duration_median_days,
+        upper = duration_p75_days,
+        ymax = duration_max_days
+      ),
+      stat = "identity",
+      width = 0.62,
+      alpha = 0.35,
+      linewidth = 0.5
+    ) +
+    geom_text(
+      data = box_data,
+      aes(x = plot_x, y = duration_median_days, label = median_label),
+      inherit.aes = FALSE,
+      vjust = 1.8,
+      size = 3.4,
+      color = "black",
+      fontface = "bold"
+    ) +
+    geom_text(
+      data = box_data,
+      aes(x = plot_x, y = duration_p25_days, label = q1_label),
+      inherit.aes = FALSE,
+      vjust = 1.8,
+      size = 3.2,
+      color = "black"
+    ) +
+    geom_text(
+      data = box_data,
+      aes(x = plot_x, y = duration_p75_days, label = q3_label),
+      inherit.aes = FALSE,
+      vjust = -0.7,
+      size = 3.2,
+      color = "black"
+    ) +
+    geom_point(
+      data = point_data,
+      aes(
+        x = plot_x,
+        y = duration_days,
+        color = utilization_category,
+        size = n_duration_events
+      ),
+      position = position_jitter(width = 0.12, height = 0),
+      alpha = 0.55,
+      inherit.aes = FALSE
+    ) +
+    scale_color_manual(values = utilization_palette, drop = FALSE) +
+    scale_fill_manual(values = utilization_palette, drop = FALSE) +
+    scale_size_area(max_size = 4, guide = "none") +
+    scale_x_discrete(labels = function(x) {
+      vapply(
+        x,
+        function(value) paste(strwrap(value, width = 14), collapse = "\n"),
+        character(1)
+      )
+    }) +
+    labs(
+      title = if (stratification == "overall") {
+        "Overall duration by visit type in Komodo"
+      } else {
+        paste(
+          utilization_category,
+          "duration by",
+          stratification_labels[[stratification]]
+        )
+      },
+      subtitle = "Boxplot shows min, quartiles, median, and max; points show aggregate duration frequencies",
+      x = if (stratification == "overall") "Visit type" else stratification_labels[[stratification]],
+      y = "Duration (days)",
+      color = "Visit type"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.text.x = element_text(size = 11, angle = 35, hjust = 1),
+      axis.text.y = element_text(size = 11),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 15, face = "bold"),
+      plot.subtitle = element_text(size = 11),
+      panel.grid.minor = element_blank(),
+      strip.text = element_text(face = "bold")
+    )
+  box_plot
+}
+
+draw_side_by_side <- function(left_plot, right_plot, left_message, right_message) {
+  grid::grid.newpage()
+  grid::pushViewport(
+    grid::viewport(
+      layout = grid::grid.layout(
+        nrow = 1,
+        ncol = 2,
+        widths = grid::unit(c(1, 1), "null")
+      )
+    )
+  )
+  for (plot_spec in list(
+    list(plot = left_plot, message = left_message, column = 1),
+    list(plot = right_plot, message = right_message, column = 2)
+  )) {
+    grid::pushViewport(
+      grid::viewport(layout.pos.row = 1, layout.pos.col = plot_spec$column)
+    )
+    if (is.null(plot_spec$plot)) {
+      grid::grid.text(plot_spec$message, gp = grid::gpar(fontsize = 12))
+    } else {
+      print(plot_spec$plot, newpage = FALSE)
+    }
+    grid::popViewport()
+  }
+  grid::popViewport()
+  invisible(NULL)
+}
+```
+
+# Overall Komodo
+
+The percentage is the percentage of eligible patient-years with at least one
+visit of the specified type. Duration summaries use nonmissing duration values
+from prepared utilization events. Scatter points represent unsuppressed
+aggregate duration frequencies and do not represent locally loaded
+patient-level rows.
+
+```{r overall-plots, results='asis', fig.show='asis', fig.width=16, fig.height=8}
+draw_side_by_side(
+  plot_prevalence(summary_inputs, "overall"),
+  plot_duration_box(summary_inputs, duration_inputs, "overall"),
+  "No unsuppressed overall visit-prevalence rows are available.",
+  "No unsuppressed overall duration rows are available."
+)
+cat("\n\n### Summary statistics\n\n")
+overall_statistics_table <- make_statistics_table(summary_inputs, "overall")
+if (is.null(overall_statistics_table)) {
+  cat("No overall summary rows are available.\n\n")
+} else {
+  print(overall_statistics_table)
+  cat("\n\n")
+}
+```
+
+# Subgroup Analyses
+
+Each subgroup analysis is presented separately for each visit type. This keeps
+the x-axis focused on the subgroup categories and gives each visit type its own
+plot and statistics table.
+
+```{r subgroup-plots, results='asis', fig.show='asis', fig.width=16, fig.height=8}
+for (stratification in setdiff(stratification_order, "overall")) {
+  cat("\n\n## ", stratification_labels[[stratification]], "\n\n", sep = "")
+
+  for (utilization_category in category_order) {
+    cat("\n\n### ", utilization_category, "\n\n", sep = "")
+
+    draw_side_by_side(
+      plot_prevalence(summary_inputs, stratification, utilization_category),
+      plot_duration_box(
+        summary_inputs,
+        duration_inputs,
+        stratification,
+        utilization_category
+      ),
+      "No unsuppressed visit-prevalence rows are available for this visit type.",
+      "No unsuppressed duration rows are available for this visit type."
+    )
+
+    cat("\n\n#### Summary statistics\n\n")
+    statistics_table <- make_statistics_table(
+      summary_inputs,
+      stratification,
+      utilization_category
+    )
+    if (is.null(statistics_table)) {
+      cat("No summary rows are available for this visit type.\n\n")
+    } else {
+      print(statistics_table)
+      cat("\n\n")
+    }
+  }
+}
+```

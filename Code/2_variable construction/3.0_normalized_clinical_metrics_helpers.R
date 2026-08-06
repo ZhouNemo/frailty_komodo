@@ -6,7 +6,7 @@ library(DBI)
 # Project: Frailty_Komoto normalized annual clinical metrics
 # Author: Nemo Zhou
 # Date started: 2026-06-30
-# Date last updated: 2026-07-16
+# Date last updated: 2026-08-06
 #
 # ---- Purpose ----
 # Provide shared configuration, connection, SQL quoting, CSV loading, and table
@@ -19,41 +19,110 @@ Sys.setenv(
   "DATABASECONNECTOR_JAR_FOLDER" = "D:/Users/xia.zhou/Documents/JDBC Driver"
 )
 
-komodo_schema <- "komodo_ext"
+redshift_server <- paste0(
+  "ohdsi-lab-redshift-cluster-prod.clsyktjhufn7.us-east-1.redshift.amazonaws.com",
+  "/ohdsi_lab"
+)
+redshift_port <- 5439L
+komodo_schema <- "komodo_202606"
 write_schema <- paste0("work_", keyring::key_get("db_username"))
 
 default_normalized_clinical_metrics_config <- list(
-  analysis_years = 2016L,
-  id_years = 2016L,
-  eligibility_table = "1_annual_eligible_cohort",
-  ids_table = "2_annual_metric_ids",
+  analysis_years = 2022L,
+  id_years = 2022L,
+  eligibility_table = "1_2022_komodo_medicare_comparison_cohort",
+  ids_table = "2_2022_komodo_medicare_comparison_metric_ids",
   normalized_dx_table = "normalized_dx_events",
   normalized_procedure_table = "normalized_procedure_events",
-  procedure_presence_table = "2_annual_procedure_code_presence",
-  hiv_evidence_table = "2_annual_hiv_diagnosis_evidence",
-  cfi_feature_matches_table = "2_annual_cfi_feature_matches",
-  ccw_feature_matches_table = "2_annual_ccw_condition_matches",
-  gagne_feature_matches_table = "2_annual_gagne_group_matches",
-  candidate_stage_table = "2_annual_dx_candidate_stage",
-  candidate_stage_manifest_table = "2_annual_dx_candidate_stage_manifest",
+  procedure_presence_table = "2_2022_komodo_medicare_comparison_procedure_code_presence",
+  hiv_evidence_table = "2_2022_komodo_medicare_comparison_hiv_diagnosis_evidence",
+  cfi_feature_matches_table = "2_2022_komodo_medicare_comparison_cfi_feature_matches",
+  ccw_feature_matches_table = "2_2022_komodo_medicare_comparison_ccw_condition_matches",
+  ccw_algorithm = "ccw56_presence",
+  gagne_feature_matches_table = "2_2022_komodo_medicare_comparison_gagne_group_matches",
+  candidate_stage_table = "2_2022_komodo_medicare_comparison_dx_candidate_stage",
+  candidate_stage_manifest_table = "2_2022_komodo_medicare_comparison_dx_candidate_stage_manifest",
   reuse_candidate_stage = FALSE,
-  cfi_scores_table = "6_annual_cfi_scores",
-  ccw_conditions_long_table = "6_annual_ccw_conditions_long",
-  ccw_condition_indicators_table = "6_annual_ccw_condition_indicators",
-  ccw_group_counts_table = "6_annual_ccw_group_counts",
-  gagne_scores_table = "6_annual_gagne_scores",
-  hiv_status_table = "6_annual_hiv_status",
-  final_table = "6_annual_clinical_metrics_shared",
+  cfi_scores_table = "6_2022_komodo_medicare_comparison_cfi_scores",
+  ccw_conditions_long_table = "6_2022_komodo_medicare_comparison_ccw_conditions_long",
+  ccw_condition_indicators_table = "6_2022_komodo_medicare_comparison_ccw_condition_indicators",
+  ccw_group_counts_table = "6_2022_komodo_medicare_comparison_ccw_group_counts",
+  gagne_scores_table = "6_2022_komodo_medicare_comparison_gagne_scores",
+  hiv_status_table = "6_2022_komodo_medicare_comparison_hiv_status",
+  hiv_non_inpatient_min_distinct_dates = 2L,
+  final_table = "6_2022_komodo_medicare_comparison_clinical_metrics_shared",
   lookup_dir = file.path(getwd(), "Documents", "Clinical Metric Look Up Tables"),
+  ccw30_lookup_dir = file.path(
+    getwd(), "Documents", "Clinical Metric Look Up Tables", "CCW30"
+  ),
   output_dir = file.path(getwd(), "Outputs"),
-  workflow_label = "normalized annual clinical metrics",
+  workflow_label = "2022 Komodo Medicare comparison normalized clinical metrics",
+  required_eligibility_columns = character(),
   refresh_metric_ids = TRUE,
   event_start_date = NULL,
   event_end_date = NULL,
   event_scan_chunk_by = "year",
-  run_cfi_2016_parity_check = TRUE,
+  calculate_cfi = TRUE,
+  reuse_cfi_scores = FALSE,
+  run_cfi_2016_parity_check = FALSE,
   model_intercept = 0.10288
 )
+
+protected_normalized_clinical_metrics_tables <- c(
+  "2_annual_metric_ids",
+  "2_annual_procedure_code_presence",
+  "2_annual_hiv_diagnosis_evidence",
+  "2_annual_dx_candidate_stage",
+  "2_annual_dx_candidate_stage_manifest",
+  "2_annual_cfi_feature_matches",
+  "2_annual_ccw_condition_matches",
+  "2_annual_gagne_group_matches",
+  "6_annual_cfi_scores",
+  "6_annual_ccw_conditions_long",
+  "6_annual_ccw_condition_indicators",
+  "6_annual_ccw_group_counts",
+  "6_annual_gagne_scores",
+  "6_annual_hiv_status",
+  "6_annual_clinical_metrics_shared",
+  "6_annual_clinical_metrics_shared_2022"
+)
+
+validate_normalized_clinical_metrics_table_names <- function(config) {
+  output_fields <- c(
+    "ids_table",
+    "procedure_presence_table",
+    "hiv_evidence_table",
+    "cfi_feature_matches_table",
+    "ccw_feature_matches_table",
+    "gagne_feature_matches_table",
+    "candidate_stage_table",
+    "candidate_stage_manifest_table",
+    "cfi_scores_table",
+    "ccw_conditions_long_table",
+    "ccw_condition_indicators_table",
+    "ccw_group_counts_table",
+    "gagne_scores_table",
+    "hiv_status_table",
+    "final_table"
+  )
+  output_names <- unname(unlist(config[output_fields], use.names = FALSE))
+  protected_outputs <- intersect(output_names, protected_normalized_clinical_metrics_tables)
+  if (length(protected_outputs) > 0L) {
+    stop(
+      "Protected original normalized-metrics table name(s) were configured as outputs: ",
+      paste(protected_outputs, collapse = ", "),
+      ". Use the 2022 comparison-specific table names."
+    )
+  }
+  if (anyDuplicated(output_names) > 0L) {
+    duplicated_outputs <- unique(output_names[duplicated(output_names)])
+    stop(
+      "Normalized-metrics output table names must be unique: ",
+      paste(duplicated_outputs, collapse = ", "), "."
+    )
+  }
+  invisible(config)
+}
 
 get_normalized_clinical_metrics_config <- function() {
   config <- utils::modifyList(
@@ -97,6 +166,19 @@ get_normalized_clinical_metrics_config <- function() {
     }
   }
 
+  config$hiv_non_inpatient_min_distinct_dates <- as.integer(
+    config$hiv_non_inpatient_min_distinct_dates
+  )
+  if (
+    length(config$hiv_non_inpatient_min_distinct_dates) != 1L ||
+      is.na(config$hiv_non_inpatient_min_distinct_dates) ||
+      config$hiv_non_inpatient_min_distinct_dates < 1L
+  ) {
+    stop(
+      "hiv_non_inpatient_min_distinct_dates must be a single positive integer."
+    )
+  }
+
   config$event_scan_chunk_by <- tolower(as.character(config$event_scan_chunk_by))
   if (
     length(config$event_scan_chunk_by) != 1L ||
@@ -115,13 +197,47 @@ get_normalized_clinical_metrics_config <- function() {
     config$event_end_date <- as.Date(sprintf("%04d-12-31", single_year))
   }
 
+  config$calculate_cfi <- isTRUE(config$calculate_cfi)
+  config$reuse_cfi_scores <- isTRUE(config$reuse_cfi_scores)
+  if (!config$calculate_cfi && !config$reuse_cfi_scores) {
+    stop(
+      "Set calculate_cfi = TRUE or reuse_cfi_scores = TRUE so the final ",
+      "clinical-metrics table has an explicit CFI source."
+    )
+  }
   config$run_cfi_2016_parity_check <- isTRUE(config$run_cfi_2016_parity_check)
+  config$ccw_algorithm <- tolower(trimws(as.character(config$ccw_algorithm)))
+  if (
+    length(config$ccw_algorithm) != 1L ||
+      is.na(config$ccw_algorithm) ||
+      !config$ccw_algorithm %in% c("ccw56_presence", "ccw30_normalized")
+  ) {
+    stop("ccw_algorithm must be 'ccw56_presence' or 'ccw30_normalized'.")
+  }
+  config$ccw30_lookup_dir <- as.character(config$ccw30_lookup_dir)
+  if (
+    length(config$ccw30_lookup_dir) != 1L ||
+      is.na(config$ccw30_lookup_dir) ||
+      !nzchar(config$ccw30_lookup_dir)
+  ) {
+    stop("ccw30_lookup_dir must be one nonempty directory path.")
+  }
+  config$required_eligibility_columns <- unique(tolower(as.character(
+    config$required_eligibility_columns
+  )))
+  if (any(is.na(config$required_eligibility_columns) | !nzchar(config$required_eligibility_columns))) {
+    stop("required_eligibility_columns must contain only nonempty column names.")
+  }
+  validate_normalized_clinical_metrics_table_names(config)
   config
 }
 
 connect_komodo <- function() {
-  con <- ohdsilab_connect(
-    username = keyring::key_get("db_username"),
+  con <- DatabaseConnector::connect(
+    dbms = "redshift",
+    server = redshift_server,
+    port = redshift_port,
+    user = keyring::key_get("db_username"),
     password = keyring::key_get("db_password")
   )
 
@@ -222,7 +338,7 @@ table_exists <- function(con, schema, table) {
   )
 }
 
-table_has_columns <- function(con, schema, table, columns) {
+get_columns <- function(con, schema, table) {
   table_identifier <- qualified_identifier(schema, table)
   catalog_columns <- tryCatch(
     DBI::dbGetQuery(
@@ -237,25 +353,29 @@ table_has_columns <- function(con, schema, table, columns) {
     error = function(e) NULL
   )
 
-  available_columns <- if (!is.null(catalog_columns) && nrow(catalog_columns) > 0L) {
-    tolower(catalog_columns$column_name)
-  } else {
-    result <- tryCatch(
-      DBI::dbGetQuery(con, paste0("SELECT * FROM ", table_identifier, " LIMIT 0")),
-      error = function(e) {
-        stop(
-          "Required table was not accessible: ",
-          schema,
-          ".",
-          table,
-          ". ",
-          conditionMessage(e),
-          call. = FALSE
-        )
-      }
-    )
-    tolower(names(result))
+  if (!is.null(catalog_columns) && nrow(catalog_columns) > 0L) {
+    return(tolower(catalog_columns$column_name))
   }
+
+  result <- tryCatch(
+    DBI::dbGetQuery(con, paste0("SELECT * FROM ", table_identifier, " LIMIT 0")),
+    error = function(e) {
+      stop(
+        "Required table was not accessible: ",
+        schema,
+        ".",
+        table,
+        ". ",
+        conditionMessage(e),
+        call. = FALSE
+      )
+    }
+  )
+  tolower(names(result))
+}
+
+table_has_columns <- function(con, schema, table, columns) {
+  available_columns <- get_columns(con, schema, table)
 
   missing_columns <- setdiff(tolower(columns), available_columns)
   if (length(missing_columns) > 0L) {

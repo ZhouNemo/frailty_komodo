@@ -23,7 +23,7 @@ library(DBI)
 #     setup, schema definitions, and project database conventions.
 #
 # Run before:
-#   Code/1_eligbility/1.1_build_annual_eligible_population.R
+#   Code/1_eligbility/Old/1.1_build_annual_eligible_population.R
 #     This diagnostic can inform whether the annual eligibility logic should
 #     allow multi-group attribution instead of excluding patient-years with
 #     multiple primary Mx or Rx groups.
@@ -38,7 +38,7 @@ Sys.setenv(
   "DATABASECONNECTOR_JAR_FOLDER" = "D:/Users/xia.zhou/Documents/JDBC Driver"
 )
 
-komodo_schema <- "komodo_ext"
+komodo_schema <- "komodo_202606"
 write_schema <- paste0("work_", keyring::key_get("db_username"))
 
 # ---- Diagnostic parameters ----

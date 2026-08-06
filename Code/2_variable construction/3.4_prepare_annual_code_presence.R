@@ -3,17 +3,17 @@ source("Code/2_variable construction/3.0_normalized_clinical_metrics_helpers.R")
 # Project: Frailty_Komoto normalized annual clinical metrics
 # Author: Nemo Zhou
 # Date started: 2026-06-30
-# Date last updated: 2026-07-16
+# Date last updated: 2026-07-31
 #
 # ---- Purpose ----
 # Build compact patient-year CFI-relevant procedure code presence from the
 # cleaned normalized Komodo procedure event table:
-#   - komodo_ext.normalized_procedure_events
+#   - komodo_202606.normalized_procedure_events
 #
 # Diagnosis code presence is intentionally not materialized in the active
 # pipeline because the all-code diagnosis table is too large for available
 # Redshift disk. Diagnosis features are matched directly from
-# `komodo_ext.normalized_dx_events` to lookup-filtered feature tables in
+# `komodo_202606.normalized_dx_events` to lookup-filtered feature tables in
 # `Code/2_variable construction/3.6_match_annual_clinical_metric_features.R`.
 #
 # Procedure codes are filtered to the reviewed CFI CPT/HCPCS lookup ranges
@@ -23,7 +23,7 @@ source("Code/2_variable construction/3.0_normalized_clinical_metrics_helpers.R")
 # times unless finer chunks are empirically justified.
 #
 # This script writes selected years to:
-#   - 2_annual_procedure_code_presence
+#   - 2_2022_komodo_medicare_comparison_procedure_code_presence
 
 config <- get_normalized_clinical_metrics_config()
 con <- connect_komodo()

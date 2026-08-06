@@ -7,7 +7,7 @@ source("Code/2_variable construction/5.0_annual_polypharmacy_helpers.R")
 #
 # ---- Purpose ----
 # Repair selected-year duplicate event keys in `2_polypharmacy_pharmacy_fills`
-# without rescanning `komodo_ext.pharmacy_events`. This is intended for the rare
+# without rescanning `komodo_202606.pharmacy_events`. This is intended for the rare
 # case where the cleaned fills table contains more than one row for the same
 # patient-year and pharmacy event key, but the duplicate rows agree on the
 # analytic exposure fields (`fill_date`, `ndc11`, and `days_supply`). It keeps

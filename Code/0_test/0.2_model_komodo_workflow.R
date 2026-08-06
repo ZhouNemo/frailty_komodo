@@ -17,7 +17,7 @@ Sys.setenv(
   "DATABASECONNECTOR_JAR_FOLDER" = "D:/Users/xia.zhou/Documents/JDBC Driver"
 )
 
-komodo_schema <- "komodo_ext"
+komodo_schema <- "komodo_202606"
 write_schema <- paste0("work_", keyring::key_get("db_username"))
 
 model_t2d_table <- "model_t2d_events"

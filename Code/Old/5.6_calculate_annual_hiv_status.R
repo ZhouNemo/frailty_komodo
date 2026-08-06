@@ -6,20 +6,22 @@ library(DBI)
 # Project: Frailty_Komoto annual HIV status
 # Author: Nemo Zhou
 # Date started: 2026-06-27
-# Date last updated: 2026-06-27
+# Date last updated: 2026-08-04
 #
 # ---- Purpose ----
 # Calculate annual HIV status from the shared diagnosis matched-event table.
 # This script does not rescan raw KRD claims and does not use pharmacy evidence.
-# The annual-only confirmation rule is:
+# The annual-only confirmation rule is configurable through
+# `hiv_non_inpatient_min_distinct_dates` and defaults to:
 #   - HIV status = 1 with at least one inpatient HIV diagnosis match in the
 #     same patient-year; or
-#   - HIV status = 1 with at least two distinct non-inpatient HIV diagnosis
-#     dates in the same patient-year.
+#   - HIV status = 1 when the configured number of distinct non-inpatient HIV
+#     diagnosis dates is observed in the same patient-year.
 #
-# A single non-inpatient HIV diagnosis match is not sufficient. HIV status is
-# not carried forward from prior years. The script writes one row per eligible
-# patient-year to:
+# The default requires two distinct non-inpatient dates. The 2022 comparison
+# pipeline sets this threshold to one to harmonize HIV evidence with the
+# diagnosis-presence rule used for CCW. HIV status is not carried forward from
+# prior years. The script writes one row per eligible patient-year to:
 #   - annual_hiv_status
 #
 # Only aggregate QA is printed.
@@ -28,7 +30,7 @@ Sys.setenv(
   "DATABASECONNECTOR_JAR_FOLDER" = "D:/Users/xia.zhou/Documents/JDBC Driver"
 )
 
-komodo_schema <- "komodo_ext"
+komodo_schema <- "komodo_202606"
 write_schema <- paste0("work_", keyring::key_get("db_username"))
 
 default_config <- list(
@@ -36,6 +38,7 @@ default_config <- list(
   ids_table = "2_annual_metric_ids",
   diagnosis_matches_table = "2_annual_diagnosis_matches",
   hiv_status_table = "annual_hiv_status",
+  hiv_non_inpatient_min_distinct_dates = 2L,
   lookup_dir = file.path(getwd(), "Documents", "Clinical Metric Look Up Tables")
 )
 
@@ -43,6 +46,19 @@ config <- utils::modifyList(
   default_config,
   getOption("frailty.clinical_metrics.config", list())
 )
+
+hiv_non_inpatient_min_distinct_dates <- as.integer(
+  config$hiv_non_inpatient_min_distinct_dates
+)
+if (
+  length(hiv_non_inpatient_min_distinct_dates) != 1L ||
+    is.na(hiv_non_inpatient_min_distinct_dates) ||
+    hiv_non_inpatient_min_distinct_dates < 1L
+) {
+  stop(
+    "hiv_non_inpatient_min_distinct_dates must be a single positive integer."
+  )
+}
 
 analysis_years <- sort(unique(as.integer(config$analysis_years)))
 if (
@@ -304,7 +320,10 @@ DatabaseConnector::executeSql(
        ids.analysis_year,
        CASE
          WHEN COALESCE(inpatient.hiv_inpatient_evidence, 0) = 1
-           OR non_inpatient.hiv_non_inpatient_second_date IS NOT NULL
+           OR COALESCE(
+                non_inpatient.hiv_non_inpatient_distinct_dates,
+                0
+              ) >= ", hiv_non_inpatient_min_distinct_dates, "
          THEN 1
          ELSE 0
        END::INTEGER AS hiv_status,
@@ -346,6 +365,11 @@ hiv_qa <- print_query(
        SUM(CASE
          WHEN hiv.hiv_status = 0
           AND hiv.hiv_inpatient_evidence = 0
+          AND hiv.hiv_non_inpatient_distinct_dates >= ",
+    hiv_non_inpatient_min_distinct_dates, "
+         THEN 1 ELSE 0 END)::BIGINT AS invalid_hiv_rule_rows,
+       SUM(CASE
+         WHEN hiv.hiv_inpatient_evidence = 0
           AND hiv.hiv_non_inpatient_distinct_dates = 1
          THEN 1 ELSE 0 END)::BIGINT AS single_non_inpatient_evidence_rows
      FROM ", ids_identifier, " ids
